@@ -2,7 +2,11 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { exampleExecuteDelivery } from "@planweave-ai/agent-host-protocol";
+import {
+  acpConversationPromptCommandSchema,
+  exampleExecuteDelivery,
+  exampleExecutionEnvelopeInput
+} from "@planweave-ai/agent-host-protocol";
 import { openAgentHostState, type AgentHostState } from "../state/agentHostState.js";
 import { acpCapabilitySnapshotTestValue } from "./support/acpCapabilitySnapshotTestValues.js";
 import { openAgentHostRemoteExecutionOutbox } from "../state/remoteExecutionOutbox.js";
@@ -64,6 +68,47 @@ function lifecycleRecord(sequence: number, state: "connecting" | "running" = "co
 }
 
 describe("authoritative Agent Host execution state", () => {
+  it("upgrades version 10 conversation rows with conservative cleanup evidence", async () => {
+    const { path, state } = await setup();
+    state.close();
+    states.pop();
+    const old = await openAgentHostDatabase(path, 5_000);
+    old.exec("ALTER TABLE agent_host_conversation_turns DROP COLUMN cleanup_safe");
+    const oldTurn = acpConversationPromptCommandSchema.parse({
+      type: "acp_conversation.prompt",
+      protocolVersion: 1,
+      operationId: "old-op",
+      turnId: "old-turn",
+      executionAttemptId: exampleExecutionEnvelopeInput.execution.attemptId,
+      sessionId: "old-session",
+      text: "Old continuation",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      sourceEnvelope: exampleExecutionEnvelopeInput
+    });
+    old
+      .prepare(
+        "INSERT INTO agent_host_conversation_turns(turn_id,command_json,command_digest,status) VALUES(?,?,?,'completed')"
+      )
+      .run(oldTurn.turnId, JSON.stringify(oldTurn), "old-digest");
+    old.prepare("UPDATE agent_host_state_schema SET version=10 WHERE singleton=1").run();
+    old.close();
+    const upgraded = await openAgentHostState(path);
+    states.push(upgraded);
+    const inspected = await openAgentHostDatabase(path, 5_000);
+    expect(inspected.prepare("SELECT version FROM agent_host_state_schema").get()).toMatchObject({
+      version: 11
+    });
+    expect(
+      inspected.prepare("PRAGMA table_info(agent_host_conversation_turns)").all()
+    ).toContainEqual(expect.objectContaining({ name: "cleanup_safe" }));
+    expect(
+      inspected
+        .prepare("SELECT cleanup_safe FROM agent_host_conversation_turns WHERE turn_id='old-turn'")
+        .get()
+    ).toMatchObject({ cleanup_safe: 0 });
+    inspected.close();
+  });
+
   it("persists exact immutable execution identity before mailbox acknowledgement", async () => {
     const { state } = await setup();
     const received = state.receive(executeMessage());

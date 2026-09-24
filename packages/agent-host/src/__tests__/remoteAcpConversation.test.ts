@@ -8,10 +8,16 @@ import {
   exampleExecutionEnvelopeInput,
   type AcpConversationCommand
 } from "@planweave-ai/agent-host-protocol";
-import { DEFAULT_ACP_SHUTDOWN_POLICY } from "@planweave-ai/runtime";
+import {
+  AcpSharedConnectionCleanupError,
+  DEFAULT_ACP_SHUTDOWN_POLICY,
+  executeAcp
+} from "@planweave-ai/runtime";
 import { openAgentHostState, type AgentHostState } from "../state/agentHostState.js";
+import { openAgentHostDatabase } from "../state/sqliteDatabase.js";
 import { RemoteAcpExecutor } from "../execution/remoteAcpExecutor.js";
 import { RemoteAcpConversationService } from "../execution/remoteAcpConversationService.js";
+import type { HostTransportClock } from "../transport/hostTransport.js";
 const fixtures: { directory: string; state: AgentHostState }[] = [];
 afterEach(async () => {
   for (const f of fixtures.splice(0)) {
@@ -47,7 +53,478 @@ async function setup() {
   };
   return { directory, state, command, receive };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function controlledClock(start: number) {
+  let now = start;
+  let nextId = 0;
+  const timers = new Map<number, { due: number; callback: () => void }>();
+  const clock: HostTransportClock = {
+    now: () => new Date(now),
+    setTimeout: (callback, delayMs) => {
+      const id = ++nextId;
+      timers.set(id, { due: now + delayMs, callback });
+      return id;
+    },
+    clearTimeout: (id) => {
+      timers.delete(Number(id));
+    }
+  };
+  return {
+    clock,
+    pending: () => timers.size,
+    advance(ms: number) {
+      const end = now + ms;
+      while (true) {
+        const next = [...timers].sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next || next[1].due > end) break;
+        now = next[1].due;
+        timers.delete(next[0]);
+        next[1].callback();
+      }
+      now = end;
+    }
+  };
+}
+
+const success = {
+  terminal: { state: "succeeded" as const, stopReason: "end_turn" },
+  cleanup: { attempted: true, completed: true }
+};
+
+async function flush() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 describe("Host remote ACP continuation", () => {
+  it("keeps the session excluded when acquisition disposal fails before a lease exists", async () => {
+    const f = await setup();
+    const result = await executeAcp({
+      launch: { trusted: true, command: process.execPath, args: [] },
+      workspace: { cwd: f.directory },
+      env: {},
+      clientInfo: { name: "PlanWeave cleanup test", version: "1" },
+      shutdown: DEFAULT_ACP_SHUTDOWN_POLICY,
+      capabilityPolicy: { required: [], optional: [] },
+      prompt: "Continue",
+      sessionStart: { kind: "load", sessionId: f.command.sessionId },
+      connectionMode: "shared",
+      provider: {
+        acquire: async () => {
+          throw new AcpSharedConnectionCleanupError(new Error("scripted_start_dispose_failure"));
+        },
+        shutdown: async () => undefined
+      }
+    });
+    expect(result.cleanup).toEqual({ attempted: true, completed: false });
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async () => ({
+      terminal: result.terminal,
+      cleanup: result.cleanup
+    }));
+    const service = new RemoteAcpConversationService(f.state.conversations, { converse });
+    f.receive(f.command);
+    service.handle(f.command);
+    await service.stop();
+    expect(service.isSessionActive(f.command.sessionId)).toBe(true);
+    const stored = await openAgentHostDatabase(join(f.directory, "state.sqlite"), 5_000);
+    expect(
+      stored
+        .prepare("SELECT cleanup_safe FROM agent_host_conversation_turns WHERE turn_id=?")
+        .get(f.command.turnId)?.cleanup_safe
+    ).toBe(0);
+    stored.close();
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: f.command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_cleanup_failed" }
+      })
+    );
+    const next = { ...f.command, turnId: "turn-after-acquisition-dispose-failure" };
+    f.receive(next);
+    const resumed = new RemoteAcpConversationService(f.state.conversations, { converse });
+    resumed.handle(next);
+    expect(converse).toHaveBeenCalledTimes(1);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: next.turnId,
+        payload: {
+          kind: "status",
+          status: "failed",
+          error: "acp_conversation_session_cleanup_unverified"
+        }
+      })
+    );
+    await resumed.stop();
+  });
+
+  it("keeps v10 sessions closed after upgrade while a newly created session can execute and continue", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "acp-conversation-v10-upgrade-"));
+    const path = join(directory, "state.sqlite");
+    const initial = await openAgentHostState(path);
+    initial.close();
+    const old = await openAgentHostDatabase(path, 5_000);
+    old.exec("ALTER TABLE agent_host_conversation_turns DROP COLUMN cleanup_safe");
+    const legacy = acpConversationPromptCommandSchema.parse({
+      type: "acp_conversation.prompt",
+      protocolVersion: 1,
+      operationId: "legacy-operation",
+      turnId: "legacy-turn",
+      executionAttemptId: exampleExecutionEnvelopeInput.execution.attemptId,
+      sessionId: "legacy-session",
+      text: "Legacy turn",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      sourceEnvelope: { ...exampleExecutionEnvelopeInput, requiredCapabilities: [] }
+    });
+    old
+      .prepare(
+        "INSERT INTO agent_host_conversation_turns(turn_id,command_json,command_digest,status) VALUES(?,?,?,'completed')"
+      )
+      .run(legacy.turnId, JSON.stringify(legacy), "legacy-digest");
+    const interrupted = {
+      ...legacy,
+      turnId: "legacy-running",
+      sessionId: "legacy-running-session"
+    };
+    old
+      .prepare(
+        "INSERT INTO agent_host_conversation_turns(turn_id,command_json,command_digest,status) VALUES(?,?,?,'running')"
+      )
+      .run(interrupted.turnId, JSON.stringify(interrupted), "legacy-running-digest");
+    old.prepare("UPDATE agent_host_state_schema SET version=10 WHERE singleton=1").run();
+    old.close();
+    const state = await openAgentHostState(path);
+    fixtures.push({ directory, state });
+    const mockAgent = fileURLToPath(
+      new URL("../../../runtime/src/__tests__/support/acpMockAgent.mjs", import.meta.url)
+    );
+    const launch = {
+      trusted: true as const,
+      command: process.execPath,
+      args: [mockAgent, "load-capable"]
+    };
+    const executor = new RemoteAcpExecutor({
+      workspaceResolver: { resolve: () => ({ cwd: directory }) },
+      runtimeWorkspaceResolver: { resolve: () => ({ cwd: directory }) },
+      profileResolver: {
+        resolve: () => ({
+          agentId: exampleExecutionEnvelopeInput.agentId,
+          capabilityPolicy: { required: [], optional: [] },
+          shutdown: DEFAULT_ACP_SHUTDOWN_POLICY,
+          launch,
+          env: {}
+        })
+      },
+      outbox: { append: vi.fn() },
+      hostCapabilities: []
+    });
+    const service = new RemoteAcpConversationService(state.conversations, executor);
+    service.recover();
+    expect(state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: interrupted.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_host_interrupted" }
+      })
+    );
+    const blocked = { ...legacy, turnId: "legacy-next" };
+    state.receive({
+      type: "mailbox.message",
+      protocolVersion: 1,
+      messageId: "legacy-message",
+      previousSequence: 0,
+      sequence: 1,
+      command: blocked
+    });
+    service.handle(blocked);
+    expect(state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: blocked.turnId,
+        payload: {
+          kind: "status",
+          status: "failed",
+          error: "acp_conversation_session_cleanup_unverified"
+        }
+      })
+    );
+    const blockedInterrupted = { ...interrupted, turnId: "legacy-running-next" };
+    state.receive({
+      type: "mailbox.message",
+      protocolVersion: 1,
+      messageId: "legacy-running-message",
+      previousSequence: 1,
+      sequence: 2,
+      command: blockedInterrupted
+    });
+    service.handle(blockedInterrupted);
+    expect(state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: blockedInterrupted.turnId,
+        payload: {
+          kind: "status",
+          status: "failed",
+          error: "acp_conversation_session_cleanup_unverified"
+        }
+      })
+    );
+
+    const fresh = await executeAcp({
+      launch,
+      workspace: { cwd: directory },
+      env: {},
+      clientInfo: { name: "PlanWeave upgrade test", version: "1.0.0" },
+      shutdown: DEFAULT_ACP_SHUTDOWN_POLICY,
+      capabilityPolicy: { required: [], optional: [] },
+      prompt: "Create a fresh session",
+      sessionStart: { kind: "new" }
+    });
+    expect(fresh.terminal.state).toBe("succeeded");
+    expect(fresh.cleanup.completed).toBe(true);
+    expect(fresh.sessionId).toBeTruthy();
+    const next = { ...legacy, turnId: "fresh-followup", sessionId: fresh.sessionId! };
+    state.receive({
+      type: "mailbox.message",
+      protocolVersion: 1,
+      messageId: "fresh-message",
+      previousSequence: 2,
+      sequence: 3,
+      command: next
+    });
+    service.handle(next);
+    await vi.waitFor(
+      () => {
+        expect(state.pendingEvents()).toContainEqual(
+          expect.objectContaining({
+            turnId: next.turnId,
+            payload: { kind: "status", status: "completed", error: null }
+          })
+        );
+      },
+      { timeout: 10_000 }
+    );
+    await service.stop();
+  }, 20_000);
+
+  it("expires before startup and stops a running turn at the absolute deadline", async () => {
+    const f = await setup();
+    const now = Date.now();
+    const time = controlledClock(now);
+    const observed = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    let signal: AbortSignal | undefined;
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(
+      async (_command, _broker, _sink, value) => {
+        signal = value;
+        return observed.promise;
+      }
+    );
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      { converse },
+      time.clock
+    );
+    const expired = { ...f.command, expiresAt: new Date(now).toISOString() };
+    f.receive(expired);
+    service.handle(expired);
+    await flush();
+    expect(converse).not.toHaveBeenCalled();
+    expect(time.pending()).toBe(0);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: expired.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+
+    const running = {
+      ...f.command,
+      turnId: "turn-deadline",
+      expiresAt: new Date(now + 2_000).toISOString()
+    };
+    f.receive(running);
+    service.handle(running);
+    await flush();
+    expect(converse).toHaveBeenCalledTimes(1);
+    time.advance(2_000);
+    expect(signal?.aborted).toBe(true);
+    expect(signal?.reason).toBe("acp_conversation_deadline_exceeded");
+    expect(service.isSessionActive(running.sessionId)).toBe(true);
+    observed.resolve(success);
+    await service.stop();
+    expect(time.pending()).toBe(0);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: running.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+  });
+
+  it("holds a same-session turn until cleanup finishes while another session proceeds", async () => {
+    const f = await setup();
+    const firstCleanup = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    const started: string[] = [];
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async (command) => {
+      started.push(command.turnId);
+      return command.turnId === "turn-one" ? firstCleanup.promise : success;
+    });
+    const service = new RemoteAcpConversationService(f.state.conversations, { converse });
+    const same = { ...f.command, turnId: "turn-two" };
+    const other = { ...f.command, turnId: "turn-other", sessionId: "other-session" };
+    f.receive(f.command);
+    service.handle(f.command);
+    f.receive(same);
+    service.handle(same);
+    service.handle(same);
+    f.receive(other);
+    service.handle(other);
+    await flush();
+    expect(started).toEqual(["turn-one", "turn-other"]);
+    expect(service.isSessionActive(f.command.sessionId)).toBe(true);
+    firstCleanup.resolve(success);
+    await flush();
+    await service.stop();
+    expect(started).toEqual(["turn-one", "turn-other", "turn-two"]);
+    expect(converse).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not classify an active turn as interrupted on transport recovery", async () => {
+    const f = await setup();
+    const completion = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async () => completion.promise);
+    const service = new RemoteAcpConversationService(f.state.conversations, { converse });
+    f.receive(f.command);
+    service.handle(f.command);
+    service.recover();
+    expect(converse).toHaveBeenCalledTimes(1);
+    expect(
+      f.state
+        .pendingEvents()
+        .some(
+          (event) =>
+            event.type === "acp_conversation.event" &&
+            event.payload.kind === "status" &&
+            event.payload.error === "acp_conversation_host_interrupted"
+        )
+    ).toBe(false);
+    completion.resolve(success);
+    await service.stop();
+  });
+
+  it("retains failed cleanup as durable session exclusion after restart", async () => {
+    const f = await setup();
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async () => ({
+      terminal: { state: "cancelled", message: "Cancelled by caller." },
+      cleanup: { attempted: true, completed: false }
+    }));
+    const service = new RemoteAcpConversationService(f.state.conversations, { converse });
+    f.receive(f.command);
+    service.handle(f.command);
+    await service.stop();
+    expect(service.isSessionActive(f.command.sessionId)).toBe(true);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: f.command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_cleanup_failed" }
+      })
+    );
+    f.state.close();
+    const reopened = await openAgentHostState(join(f.directory, "state.sqlite"));
+    fixtures.find((fixture) => fixture.directory === f.directory)!.state = reopened;
+    const restored = new RemoteAcpConversationService(reopened.conversations, { converse });
+    const next = { ...f.command, turnId: "turn-after-unsafe" };
+    reopened.receive({
+      type: "mailbox.message",
+      protocolVersion: 1,
+      messageId: "message-2",
+      previousSequence: 1,
+      sequence: 2,
+      command: next
+    });
+    restored.handle(next);
+    expect(() => restored.handle(f.command)).not.toThrow();
+    expect(() => restored.handle(next)).not.toThrow();
+    expect(converse).toHaveBeenCalledTimes(1);
+    expect(reopened.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: next.turnId,
+        payload: {
+          kind: "status",
+          status: "failed",
+          error: "acp_conversation_session_cleanup_unverified"
+        }
+      })
+    );
+    await restored.stop();
+  });
+
+  it("keeps ownership during stop and treats a throwing executor as unverified cleanup", async () => {
+    const f = await setup();
+    const pending = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    let rejectExecution!: (error: Error) => void;
+    const completion = new Promise<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>(
+      (resolve, reject) => {
+        pending.promise.then(resolve);
+        rejectExecution = reject;
+      }
+    );
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async () => completion);
+    const service = new RemoteAcpConversationService(f.state.conversations, { converse });
+    f.receive(f.command);
+    service.handle(f.command);
+    await flush();
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await flush();
+    expect(stopped).toBe(false);
+    expect(service.isSessionActive(f.command.sessionId)).toBe(true);
+    rejectExecution(new Error("cleanup_transport_broke"));
+    await stopping;
+    expect(service.isSessionActive(f.command.sessionId)).toBe(true);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: f.command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_cleanup_failed" }
+      })
+    );
+  });
+
+  it("surfaces terminal persistence failure and does not start queued work", async () => {
+    const f = await setup();
+    const first = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async (command) =>
+      command.turnId === f.command.turnId ? first.promise : success
+    );
+    const repository = f.state.conversations;
+    const append = repository.append.bind(repository);
+    vi.spyOn(repository, "append").mockImplementation((turnId, payload) => {
+      if (
+        turnId === f.command.turnId &&
+        payload.kind === "status" &&
+        payload.status === "completed"
+      )
+        throw new Error("disk_write_failed");
+      append(turnId, payload);
+    });
+    const service = new RemoteAcpConversationService(repository, { converse });
+    const next = { ...f.command, turnId: "turn-after-write-failure" };
+    f.receive(f.command);
+    service.handle(f.command);
+    f.receive(next);
+    service.handle(next);
+    first.resolve(success);
+    await flush();
+    await expect(service.stop()).rejects.toThrow("disk_write_failed");
+    expect(converse).toHaveBeenCalledTimes(1);
+  });
+
   it("projects exact permission kinds and returns the selected original option ID", async () => {
     const f = await setup();
     const options = [
@@ -72,7 +549,10 @@ describe("Host remote ACP continuation", () => {
             { signal, deadline: new Date(f.command.expiresAt) }
           )
         );
-        return { state: "succeeded", stopReason: "end_turn" };
+        return {
+          terminal: { state: "succeeded", stopReason: "end_turn" },
+          cleanup: { attempted: true, completed: true }
+        };
       }
     );
     const service = new RemoteAcpConversationService(f.state.conversations, { converse });
@@ -209,10 +689,14 @@ describe("Host remote ACP continuation", () => {
     const f = await setup();
     const execute = vi.fn(
       async (_command, _broker, _sink, signal: AbortSignal) =>
-        new Promise<{ state: "cancelled"; reason: "cancelled" }>((resolve) =>
+        new Promise<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>((resolve) =>
           signal.addEventListener(
             "abort",
-            () => resolve({ state: "cancelled", reason: "cancelled" }),
+            () =>
+              resolve({
+                terminal: { state: "cancelled", message: "Cancelled by caller." },
+                cleanup: { attempted: true, completed: true }
+              }),
             { once: true }
           )
         )

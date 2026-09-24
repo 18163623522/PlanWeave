@@ -1096,6 +1096,7 @@ export {
 export type { SharedAcpConnectionProviderOptions } from "./autoRun/acpSharedConnectionProvider.js";
 export {
   AcpSharedConnectionAuthRequiredError,
+  AcpSharedConnectionCleanupError,
   AcpSharedConnectionLostError,
   AcpSharedConnectionShutdownError
 } from "./autoRun/acpSharedConnectionErrors.js";

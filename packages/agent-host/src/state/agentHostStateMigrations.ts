@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { parseHistoricalAgentHostMailboxCommand } from "../protocol.js";
 import { inWriteTransaction, type SqliteDatabase } from "./sqliteDatabase.js";
 
-const CURRENT_AGENT_HOST_STATE_SCHEMA_VERSION = 10;
+const CURRENT_AGENT_HOST_STATE_SCHEMA_VERSION = 11;
 const PRE_REMOTE_RUNNER_EVENT_PROTOCOL_SCHEMA_VERSION = 8;
 const PRE_RESET_RESULT_SCHEMA_VERSION = 7;
 const PRE_RESET_OPERATION_SCHEMA_VERSION = 6;
@@ -513,7 +513,8 @@ const currentRequiredTables: Readonly<Record<string, RequiredTableShape>> = {
       "status",
       "last_sequence",
       "event_bytes",
-      "cancelled"
+      "cancelled",
+      "cleanup_safe"
     ],
     uniqueKeys: [["turn_id"]]
   },
@@ -864,6 +865,20 @@ export function initializeAgentHostStateSchema(database: SqliteDatabase): void {
     const priorVersion = storedSchemaVersion(database);
     if (priorVersion === CURRENT_AGENT_HOST_STATE_SCHEMA_VERSION) {
       assertCurrentSchemaComplete(database);
+    } else if (priorVersion === 10) {
+      assertRequiredTablesAndVersion(
+        database,
+        {
+          ...currentRequiredTables,
+          agent_host_conversation_turns: {
+            ...currentRequiredTables.agent_host_conversation_turns!,
+            columns: currentRequiredTables.agent_host_conversation_turns!.columns.filter(
+              (column) => column !== "cleanup_safe"
+            )
+          }
+        },
+        10
+      );
     } else if (priorVersion === 9) {
       assertRequiredTablesAndVersion(database, versionNineRequiredTables, 9);
     } else if (priorVersion === PRE_REMOTE_RUNNER_EVENT_PROTOCOL_SCHEMA_VERSION) {
@@ -902,6 +917,13 @@ export function initializeAgentHostStateSchema(database: SqliteDatabase): void {
     }
     database.exec(baseSchema);
     database.exec(acpConversationHostSchema);
+    if (priorVersion === 10) {
+      database.exec(
+        "ALTER TABLE agent_host_conversation_turns ADD COLUMN cleanup_safe INTEGER NOT NULL DEFAULT 1 CHECK(cleanup_safe IN (0,1))"
+      );
+      // Earlier conversation outcomes did not persist cleanup evidence.
+      database.exec("UPDATE agent_host_conversation_turns SET cleanup_safe=0");
+    }
     assertNoLegacyRemoteRunnerEventsInOutbox(database);
     addLegacyInboxColumns(database);
     addInteractionSettlementColumns(database);

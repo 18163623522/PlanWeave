@@ -108,6 +108,7 @@ export const probeInstalledAcpAgent: AcpPreflightProbe = async ({
   let lease: AcpConnectionLease;
   try {
     lease = await createAcpConnectionProvider({ mode: profile.connection.mode }).acquire({
+      signal,
       launch: { trusted: true, command: prepared.command, args: prepared.args },
       cwd,
       spawnCwd: prepared.spawnCwd ?? null,

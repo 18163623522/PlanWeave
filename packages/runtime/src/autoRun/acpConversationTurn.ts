@@ -418,6 +418,7 @@ export class AcpConversationTurnCoordinator {
       onElicitationRequest: async () => ({ action: "cancel" })
     };
     const lease = await this.providerFor(input.profile.connection.mode).acquire({
+      signal,
       launch: { trusted: true, command: preparedLaunch.command, args: preparedLaunch.args },
       cwd: input.cwd,
       spawnCwd: preparedLaunch.spawnCwd ?? null,

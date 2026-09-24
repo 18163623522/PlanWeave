@@ -24,6 +24,7 @@ import type { AcpConnectionLease, AcpOwnedSession } from "./acpConnectionProvide
 import { createAcpConnectionProvider } from "./acpConnectionProviderFactory.js";
 import {
   AcpSharedConnectionAuthRequiredError,
+  AcpSharedConnectionCleanupError,
   AcpSharedConnectionLostError
 } from "./acpSharedConnectionErrors.js";
 import { normalizeAcpSessionNotification } from "./acpEventNormalization.js";
@@ -203,6 +204,7 @@ async function executeAcpOutcome(
   let sinkFailure: unknown;
   let sessionUpdateFailure: unknown;
   let executionCause: unknown;
+  let acquisitionCleanupFailure: AcpSharedConnectionCleanupError | undefined;
   let sessionIdentityPublished = false;
   let pendingSessionUpdates: SessionNotification[] = [];
   let pendingSessionUpdateBytes = 0;
@@ -304,6 +306,7 @@ async function executeAcpOutcome(
     };
     try {
       lease = await provider.acquire({
+        signal: abortController.signal,
         launch: options.launch,
         cwd: options.workspace.cwd,
         env: options.env,
@@ -319,6 +322,7 @@ async function executeAcpOutcome(
         ...(options.poolIdentity ? { poolIdentity: options.poolIdentity } : {})
       });
     } catch (error) {
+      if (error instanceof AcpSharedConnectionCleanupError) acquisitionCleanupFailure = error;
       if (error instanceof AcpSharedConnectionAuthRequiredError) {
         throw new AcpAuthenticationRequiredError(error.outcome);
       }
@@ -505,6 +509,7 @@ async function executeAcpOutcome(
     const cleanup = new AcpCleanupSequencer(createAcpCleanupDeadline(shutdown.cleanupDeadlineMs));
     let cleanupEventFailure: unknown;
     const cleanupFailures: unknown[] = [];
+    if (acquisitionCleanupFailure) cleanupFailures.push(acquisitionCleanupFailure);
     try {
       await emit({ kind: "lifecycle", state: "cleanup" });
     } catch (error) {

@@ -494,7 +494,12 @@ class SubprocessAcpConnection implements AcpConnection {
     this.terminalError ??= error;
     if (!this.process.stdin.destroyed) this.process.stdin.destroy(error);
     if (!this.process.stdout.destroyed) this.process.stdout.destroy(error);
-    void this.dispose(cleanupDeadline ? { cleanupDeadline } : undefined);
+    void this.dispose(cleanupDeadline ? { cleanupDeadline } : undefined).catch((cleanupError) => {
+      this.terminalError = new AggregateError(
+        [this.terminalError ?? error, cleanupError],
+        "ACP process termination and cleanup failed."
+      );
+    });
   }
 
   private async disposeProcess(deadline: AcpCleanupDeadline): Promise<void> {

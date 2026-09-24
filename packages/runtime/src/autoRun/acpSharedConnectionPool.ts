@@ -18,6 +18,7 @@ import type {
 } from "./acpConnectionProvider.js";
 import {
   AcpSharedConnectionAuthRequiredError,
+  AcpSharedConnectionCleanupError,
   AcpSharedConnectionLostError,
   AcpSharedConnectionShutdownError
 } from "./acpSharedConnectionErrors.js";
@@ -30,6 +31,13 @@ export const SHARED_ACP_CONNECTION_IDLE_MS = 250;
 export type SharedAcpConnectionPoolOptions = {
   readonly connect?: (options: CreateAcpConnectionOptions) => AcpConnection;
   readonly idleMs?: number;
+};
+
+type PendingStart = {
+  readonly promise: Promise<SharedAcpPoolEntry>;
+  readonly controller: AbortController;
+  cancellation?: Promise<void>;
+  waiters: number;
 };
 
 export type SharedAcpConnectionEntryState = "starting" | "ready" | "draining" | "failed" | "closed";
@@ -67,7 +75,8 @@ export class SharedAcpConnectionPool {
   private readonly connect: (options: CreateAcpConnectionOptions) => AcpConnection;
   private readonly idleMs: number;
   private readonly entries = new Map<string, SharedAcpPoolEntry>();
-  private readonly starts = new Map<string, Promise<SharedAcpPoolEntry>>();
+  private readonly starts = new Map<string, PendingStart>();
+  private readonly cleanupFailures = new Map<string, AcpSharedConnectionCleanupError>();
   private shuttingDown = false;
 
   constructor(options: SharedAcpConnectionPoolOptions = {}) {
@@ -80,28 +89,127 @@ export class SharedAcpConnectionPool {
 
   async acquire(request: AcpConnectionAcquireRequest): Promise<SharedAcpConnectionEntry> {
     if (this.shuttingDown) throw new AcpSharedConnectionShutdownError();
+    if (request.signal?.aborted) throw request.signal.reason;
     const key = acpSharedConnectionKey(request);
+    const unsafe = this.cleanupFailures.get(key);
+    if (unsafe) throw unsafe;
     const existing = this.entries.get(key);
     if (existing && existing.isReusable()) {
       existing.cancelIdle();
       return existing;
     }
-    const pending = this.starts.get(key);
-    if (pending) return pending;
-    const started = this.startEntry(key, request);
-    this.starts.set(key, started);
-    try {
-      return await started;
-    } finally {
-      if (this.starts.get(key) === started) this.starts.delete(key);
+    let pending = this.starts.get(key);
+    if (pending?.controller.signal.aborted) {
+      try {
+        await (pending.cancellation ?? pending.promise);
+      } catch (error) {
+        if (error instanceof AcpSharedConnectionCleanupError) throw error;
+      }
+      const failed = this.cleanupFailures.get(key);
+      if (failed) throw failed;
+      return this.acquire(request);
     }
+    if (!pending) {
+      const controller = new AbortController();
+      pending = {
+        controller,
+        waiters: 0,
+        promise: this.startEntry(key, { ...request, signal: controller.signal })
+      };
+      this.starts.set(key, pending);
+      const started = pending;
+      const clear = () => {
+        const remove = () => {
+          if (this.starts.get(key) === started) this.starts.delete(key);
+        };
+        if (started.cancellation) void started.cancellation.then(remove, remove);
+        else remove();
+      };
+      void started.promise.then(clear, clear);
+    }
+    return this.waitForStart(key, pending, request.signal);
+  }
+
+  private waitForStart(
+    key: string,
+    pending: PendingStart,
+    signal?: AbortSignal
+  ): Promise<SharedAcpPoolEntry> {
+    pending.waiters += 1;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (outcome: { entry: SharedAcpPoolEntry } | { error: unknown }) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        pending.waiters -= 1;
+        if ("error" in outcome) reject(outcome.error);
+        else resolve(outcome.entry);
+      };
+      const onAbort = () => {
+        if (settled) return;
+        if (pending.waiters > 1) {
+          finish({ error: signal?.reason });
+          return;
+        }
+        pending.controller.abort(signal?.reason);
+        pending.cancellation ??= pending.promise.then(
+          async (entry) => {
+            await entry.disposeImmediate();
+          },
+          (error) => {
+            if (error instanceof AcpSharedConnectionCleanupError) throw error;
+          }
+        );
+        void pending.cancellation.then(
+          () => finish({ error: signal?.reason }),
+          (error) => finish({ error: this.rememberCleanupFailure(key, error) })
+        );
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      void pending.promise.then(
+        (entry) => {
+          if (!signal?.aborted) finish({ entry });
+        },
+        (error) => {
+          if (!signal?.aborted) finish({ error });
+        }
+      );
+    });
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const entries = [...this.entries.values()];
+    const starts = [...this.starts.values()];
+    for (const pending of starts) pending.controller.abort(new AcpSharedConnectionShutdownError());
     this.starts.clear();
-    await Promise.all(entries.map((entry) => entry.shutdown()));
+    const outcomes = await Promise.allSettled([
+      ...entries.map((entry) => entry.shutdown()),
+      ...starts.map((pending) => pending.cancellation ?? pending.promise)
+    ]);
+    const failures = new Set<unknown>(this.cleanupFailures.values());
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status !== "rejected") return;
+      if (index < entries.length || outcome.reason instanceof AcpSharedConnectionCleanupError) {
+        failures.add(outcome.reason);
+      }
+    });
+    if (failures.size === 1) throw [...failures][0];
+    if (failures.size > 1) {
+      throw new AggregateError([...failures], "ACP shared connection shutdown failed.");
+    }
+  }
+
+  private rememberCleanupFailure(key: string, error: unknown): AcpSharedConnectionCleanupError {
+    const failure =
+      this.cleanupFailures.get(key) ??
+      (error instanceof AcpSharedConnectionCleanupError
+        ? error
+        : new AcpSharedConnectionCleanupError(error));
+    this.cleanupFailures.set(key, failure);
+    return failure;
   }
 
   private async startEntry(
@@ -114,21 +222,31 @@ export class SharedAcpConnectionPool {
       return existing;
     }
     if (this.shuttingDown) throw new AcpSharedConnectionShutdownError();
-    const entry = new SharedAcpPoolEntry(key, this.connect, request, this.idleMs, () => {
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-    });
+    const entry = new SharedAcpPoolEntry(
+      key,
+      this.connect,
+      request,
+      this.idleMs,
+      () => {
+        if (this.entries.get(key) === entry) this.entries.delete(key);
+      },
+      (error) => this.rememberCleanupFailure(key, error)
+    );
     this.entries.set(key, entry);
     try {
       await entry.start();
       return entry;
     } catch (error) {
-      this.entries.delete(key);
+      if (this.entries.get(key) === entry) this.entries.delete(key);
       try {
         await entry.disposeImmediate();
       } catch (disposeError) {
-        throw new AggregateError(
-          [error, disposeError],
-          "ACP shared connection start and disposal failed."
+        throw this.rememberCleanupFailure(
+          key,
+          new AggregateError(
+            [error, disposeError],
+            "ACP shared connection start and disposal failed."
+          )
         );
       }
       throw error;
@@ -165,7 +283,8 @@ class SharedAcpPoolEntry implements SharedAcpConnectionEntry {
     private readonly connect: (options: CreateAcpConnectionOptions) => AcpConnection,
     private readonly request: AcpConnectionAcquireRequest,
     private readonly idleMs: number,
-    private readonly forget: () => void
+    private readonly forget: () => void,
+    private readonly reportCleanupFailure: (error: unknown) => AcpSharedConnectionCleanupError
   ) {}
 
   state(): SharedAcpConnectionEntryState {
@@ -379,17 +498,22 @@ class SharedAcpPoolEntry implements SharedAcpConnectionEntry {
         this.onConnectionEnded();
       });
       const initialized = await this.initialize({
+        signal: this.request.signal,
         timeoutMs: this.request.defaultTimeoutMs
       });
+      if (this.request.signal?.aborted) throw this.request.signal.reason;
       await this.authenticateIfHeadless(initialized);
+      if (this.request.signal?.aborted) throw this.request.signal.reason;
       this.entryState = "ready";
     } catch (error) {
       try {
         await this.disposeImmediate();
       } catch (disposeError) {
-        throw new AggregateError(
-          [error, disposeError],
-          "ACP shared connection start and disposal failed."
+        throw this.reportCleanupFailure(
+          new AggregateError(
+            [error, disposeError],
+            "ACP shared connection start and disposal failed."
+          )
         );
       }
       throw error;
@@ -401,7 +525,7 @@ class SharedAcpPoolEntry implements SharedAcpConnectionEntry {
       connection: this,
       initialized,
       availableEnvironmentVariables: new Set(Object.keys(this.request.env)),
-      operationOptions: { timeoutMs: this.request.defaultTimeoutMs }
+      operationOptions: { signal: this.request.signal, timeoutMs: this.request.defaultTimeoutMs }
     });
     if (outcome.kind === "auth_required") {
       throw new AcpSharedConnectionAuthRequiredError(outcome, initialized);
@@ -414,7 +538,7 @@ class SharedAcpPoolEntry implements SharedAcpConnectionEntry {
     if (this.entryState === "closed") return;
     this.entryState = "failed";
     this.fanOutLost(new AcpSharedConnectionLostError());
-    void this.disposeImmediate();
+    void this.disposeImmediate().catch((error) => this.reportCleanupFailure(error));
   }
 
   private fanOutLost(
@@ -443,6 +567,8 @@ class SharedAcpPoolEntry implements SharedAcpConnectionEntry {
           cleanupDeadline: createAcpCleanupDeadline(this.request.shutdown.cleanupDeadlineMs)
         });
       }
+    } catch (error) {
+      throw this.reportCleanupFailure(error);
     } finally {
       this.entryState = "closed";
       this.forget();

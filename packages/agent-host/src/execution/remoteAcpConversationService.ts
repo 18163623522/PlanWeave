@@ -8,21 +8,33 @@ import type {
   AcpEngineInteractionContext
 } from "@planweave-ai/runtime";
 import type { AcpConversationRepository } from "../state/acpConversationRepository.js";
-import type { RemoteAcpExecutor } from "./remoteAcpExecutor.js";
+import type { HostTransportClock } from "../transport/hostTransport.js";
+import { systemHostTransportClock } from "../transport/hostTransport.js";
+import { RemoteAcpConversationSetupError, type RemoteAcpExecutor } from "./remoteAcpExecutor.js";
 import { agentHostRemoteEngineEventSchema } from "./remoteAcpPorts.js";
 import { remoteAcpEngineFragment } from "./remoteAcpEngineFragment.js";
 
 export class RemoteAcpConversationService {
   private persistenceFailure: unknown;
   private readonly active = new Map<string, AbortController>();
+  private readonly sessions = new Map<string, string>();
+  private readonly unsafeSessions = new Set<string>();
   private readonly runs = new Set<Promise<void>>();
+  private stopped = false;
   constructor(
     private readonly repository: AcpConversationRepository,
-    private readonly executor: Pick<RemoteAcpExecutor, "converse">
-  ) {}
+    private readonly executor: Pick<RemoteAcpExecutor, "converse">,
+    private readonly clock: HostTransportClock = systemHostTransportClock
+  ) {
+    for (const sessionId of repository.unsafeSessions()) this.unsafeSessions.add(sessionId);
+  }
 
   recover(): void {
-    for (const turnId of this.repository.recover()) this.launch(turnId);
+    if (this.persistenceFailure) throw this.persistenceFailure;
+    this.stopped = false;
+    const queued = this.repository.recover(new Set(this.active.keys()));
+    for (const sessionId of this.repository.unsafeSessions()) this.unsafeSessions.add(sessionId);
+    for (const turnId of queued) this.launch(turnId);
   }
 
   handle(command: AcpConversationCommand): void {
@@ -32,40 +44,93 @@ export class RemoteAcpConversationService {
   }
 
   isSessionActive(sessionId: string): boolean {
-    return [...this.active.keys()].some(
-      (turnId) => this.repository.command(turnId).sessionId === sessionId
-    );
+    return this.sessions.has(sessionId) || this.unsafeSessions.has(sessionId);
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     for (const controller of this.active.values()) controller.abort();
     await Promise.all(this.runs);
     if (this.persistenceFailure) throw this.persistenceFailure;
   }
 
   private launch(turnId: string): void {
-    if (this.active.has(turnId) || !this.repository.start(turnId)) return;
+    if (this.stopped || this.active.has(turnId) || !this.repository.isQueued(turnId)) return;
+    const command = this.repository.command(turnId);
+    if (this.unsafeSessions.has(command.sessionId)) {
+      this.repository.append(turnId, {
+        kind: "status",
+        status: "failed",
+        error: "acp_conversation_session_cleanup_unverified"
+      });
+      return;
+    }
+    if (this.sessions.has(command.sessionId)) return;
+    this.sessions.set(command.sessionId, turnId);
+    let started: boolean;
+    try {
+      started = this.repository.start(turnId);
+    } catch (error) {
+      this.sessions.delete(command.sessionId);
+      throw error;
+    }
+    if (!started) {
+      this.sessions.delete(command.sessionId);
+      return;
+    }
     const controller = new AbortController();
     this.active.set(turnId, controller);
-    const run = this.execute(turnId, controller).finally(() => {
-      this.active.delete(turnId);
-      this.runs.delete(run);
-    });
+    const deadlineMs = Date.parse(command.expiresAt);
+    let timer: unknown;
+    const checkDeadline = () => {
+      if (this.clock.now().getTime() >= deadlineMs) {
+        controller.abort("acp_conversation_deadline_exceeded");
+      } else {
+        timer = this.clock.setTimeout(
+          checkDeadline,
+          Math.min(1_000, deadlineMs - this.clock.now().getTime())
+        );
+      }
+    };
+    checkDeadline();
+    const run = this.execute(turnId, controller, deadlineMs)
+      .catch((failure) => {
+        this.persistenceFailure = failure;
+        throw failure;
+      })
+      .finally(() => {
+        if (timer !== undefined) this.clock.clearTimeout(timer);
+        this.active.delete(turnId);
+        this.sessions.delete(command.sessionId);
+        this.runs.delete(run);
+        if (!this.stopped && !this.persistenceFailure) {
+          for (const queuedTurnId of this.repository.queued()) this.launch(queuedTurnId);
+        }
+      });
     this.runs.add(run);
     void run.catch((error) => {
       this.persistenceFailure = error;
     });
   }
 
-  private async execute(turnId: string, controller: AbortController): Promise<void> {
+  private async execute(
+    turnId: string,
+    controller: AbortController,
+    deadlineMs: number
+  ): Promise<void> {
     let status: "completed" | "cancelled" | "failed" = "failed";
     let error: string | null = null;
+    let cleanupSafe = true;
+    let cleanupObserved = false;
+    let executorStarted = false;
     try {
       const command = this.repository.command(turnId);
       if (this.repository.cancelled(turnId)) controller.abort();
-      if (Date.parse(command.expiresAt) <= Date.now())
+      if (this.clock.now().getTime() >= deadlineMs)
         throw new Error("acp_conversation_deadline_exceeded");
-      const terminal = await this.executor.converse(
+      if (controller.signal.aborted) throw new Error("acp_conversation_cancelled");
+      executorStarted = true;
+      const outcome = await this.executor.converse(
         command,
         this.broker(turnId),
         async (event) => {
@@ -81,6 +146,7 @@ export class RemoteAcpConversationService {
           ) {
             throw new Error("acp_conversation_session_mismatch");
           }
+          if (controller.signal.aborted) throw new Error("acp_conversation_cancelled");
           this.repository.append(turnId, {
             kind: "runner",
             fragment: remoteAcpEngineFragment(safeEvent)
@@ -88,20 +154,49 @@ export class RemoteAcpConversationService {
         },
         controller.signal
       );
+      cleanupObserved = true;
+      cleanupSafe = outcome.cleanup.completed;
+      if (!cleanupSafe) throw new Error("acp_conversation_cleanup_failed");
+      if (
+        this.clock.now().getTime() >= deadlineMs ||
+        controller.signal.reason === "acp_conversation_deadline_exceeded"
+      )
+        throw new Error("acp_conversation_deadline_exceeded");
+      if (controller.signal.aborted) throw new Error("acp_conversation_cancelled");
       status =
-        terminal.state === "succeeded"
+        outcome.terminal.state === "succeeded"
           ? "completed"
-          : terminal.state === "cancelled"
+          : outcome.terminal.state === "cancelled"
             ? "cancelled"
             : "failed";
-      if (status === "failed") error = "acp_conversation_" + terminal.state;
+      if (status === "failed") error = `acp_conversation_${outcome.terminal.state}`;
     } catch (cause) {
-      status = controller.signal.aborted ? "cancelled" : "failed";
+      if (
+        executorStarted &&
+        !cleanupObserved &&
+        !(cause instanceof RemoteAcpConversationSetupError)
+      )
+        cleanupSafe = false;
+      const deadline =
+        this.clock.now().getTime() >= deadlineMs ||
+        controller.signal.reason === "acp_conversation_deadline_exceeded";
+      status = deadline ? "failed" : controller.signal.aborted ? "cancelled" : "failed";
       // Engine diagnostics are delivered through its redacted runner events.
-      error =
-        cause instanceof Error && /^acp_conversation_[a-z_]+$/.test(cause.message)
-          ? cause.message
-          : "acp_conversation_execution_failed";
+      error = deadline
+        ? "acp_conversation_deadline_exceeded"
+        : status === "cancelled" && cleanupSafe
+          ? null
+          : cause instanceof Error && /^acp_conversation_[a-z_]+$/.test(cause.message)
+            ? cause.message
+            : "acp_conversation_execution_failed";
+    }
+    if (!cleanupSafe) {
+      this.repository.markCleanupUnsafe(turnId);
+      this.unsafeSessions.add(this.repository.command(turnId).sessionId);
+      if (error !== "acp_conversation_deadline_exceeded") {
+        status = "failed";
+        error = "acp_conversation_cleanup_failed";
+      }
     }
     this.repository.append(turnId, { kind: "status", status, error });
   }

@@ -87,6 +87,14 @@ export class AcpConversationRepository {
     );
   }
 
+  isQueued(turnId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT status FROM agent_host_conversation_turns WHERE turn_id=?")
+        .get(turnId)?.status === "queued"
+    );
+  }
+
   start(turnId: string): boolean {
     return inWriteTransaction(this.db, () => {
       const row = this.db
@@ -98,20 +106,44 @@ export class AcpConversationRepository {
     });
   }
 
-  recover(): string[] {
+  queued(): string[] {
+    return this.db
+      .prepare("SELECT turn_id FROM agent_host_conversation_turns WHERE status='queued'")
+      .all()
+      .map((row) => String(row.turn_id));
+  }
+
+  unsafeSessions(): string[] {
+    return this.db
+      .prepare("SELECT command_json FROM agent_host_conversation_turns WHERE cleanup_safe=0")
+      .all()
+      .map((row) => acpConversationCommandSchema.parse(JSON.parse(String(row.command_json))))
+      .filter(
+        (command): command is AcpConversationPromptCommand =>
+          command.type === "acp_conversation.prompt"
+      )
+      .map((command) => command.sessionId);
+  }
+
+  markCleanupUnsafe(turnId: string): void {
+    this.db
+      .prepare("UPDATE agent_host_conversation_turns SET cleanup_safe=0 WHERE turn_id=?")
+      .run(turnId);
+  }
+
+  recover(activeTurnIds: ReadonlySet<string> = new Set()): string[] {
     for (const row of this.db
       .prepare("SELECT turn_id FROM agent_host_conversation_turns WHERE status='running'")
       .all()) {
+      if (activeTurnIds.has(String(row.turn_id))) continue;
+      this.markCleanupUnsafe(String(row.turn_id));
       this.append(String(row.turn_id), {
         kind: "status",
         status: "failed",
         error: "acp_conversation_host_interrupted"
       });
     }
-    return this.db
-      .prepare("SELECT turn_id FROM agent_host_conversation_turns WHERE status='queued'")
-      .all()
-      .map((row) => String(row.turn_id));
+    return this.queued();
   }
 
   append(turnId: string, payload: AcpConversationEvent["payload"]): void {

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 import { createAcpConnection, type AcpConnection } from "../autoRun/acpConnection.js";
 import { executeAcp } from "../autoRun/acpExecutionEngine.js";
+import { AcpSharedConnectionCleanupError } from "../autoRun/acpSharedConnectionErrors.js";
 import type { AcpEngineEvent, ExecuteAcpOptions } from "../autoRun/acpExecutionEngineContracts.js";
 import { ACP_MOCK_OPERATION_TIMEOUT_MS } from "./support/acpMockHarness.js";
 
@@ -33,6 +34,22 @@ function engineOptions(
 }
 
 describe("storage-neutral ACP execution engine", () => {
+  it("marks acquisition disposal failure as incomplete cleanup without a lease", async () => {
+    const result = await executeAcp(
+      engineOptions("success", {
+        connectionMode: "shared",
+        provider: {
+          acquire: async () => {
+            throw new AcpSharedConnectionCleanupError(new Error("scripted_start_dispose_failure"));
+          },
+          shutdown: async () => undefined
+        }
+      })
+    );
+    expect(result.terminal.state).toBe("failed");
+    expect(result.cleanup).toEqual({ attempted: true, completed: false });
+  });
+
   it("gates required capabilities before authentication or session RPCs", async () => {
     const events: AcpEngineEvent[] = [];
     const connection = {

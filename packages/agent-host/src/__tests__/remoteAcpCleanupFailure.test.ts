@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   exampleExecutionEnvelopeInput,
+  acpConversationPromptCommandSchema,
   executeBlockCommandSchema,
   executionEnvelopeSchema,
   hashExecutionEnvelope
@@ -81,5 +82,98 @@ describe("remote ACP cleanup evidence", () => {
       })
     ).rejects.toMatchObject({ failure: { code: "acp_cleanup_failed" } });
     expect(upload).not.toHaveBeenCalled();
+  });
+
+  it.each(terminals)("passes $state cleanup evidence through converse", async (terminal) => {
+    vi.mocked(executeAcp).mockResolvedValue({
+      terminal,
+      cleanup: { attempted: true, completed: false },
+      sessionId: "cleanup-session",
+      output: "",
+      stderr: [],
+      capabilities: null,
+      capabilitySnapshot: null,
+      authentication: null,
+      usage: null
+    });
+    const command = acpConversationPromptCommandSchema.parse({
+      type: "acp_conversation.prompt",
+      protocolVersion: 1,
+      operationId: "op-cleanup",
+      turnId: "turn-cleanup",
+      executionAttemptId: exampleExecutionEnvelopeInput.execution.attemptId,
+      sessionId: "cleanup-session",
+      text: "Continue",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      sourceEnvelope: { ...exampleExecutionEnvelopeInput, requiredCapabilities: [] }
+    });
+    const executor = new RemoteAcpExecutor({
+      workspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+      runtimeWorkspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+      profileResolver: {
+        resolve: () => ({
+          agentId: command.sourceEnvelope.agentId,
+          capabilityPolicy: { required: [], optional: [] },
+          launch: { command: process.execPath, args: [] },
+          env: {},
+          shutdown: DEFAULT_ACP_SHUTDOWN_POLICY
+        })
+      },
+      outbox: { append: vi.fn() },
+      hostCapabilities: []
+    });
+    const outcome = await executor.converse(
+      command,
+      { requestPermission: vi.fn(), requestElicitation: vi.fn() },
+      vi.fn(),
+      new AbortController().signal
+    );
+    expect(outcome).toEqual({ terminal, cleanup: { attempted: true, completed: false } });
+  });
+
+  it("does not launch ACP when context resolution returns after cancellation", async () => {
+    vi.mocked(executeAcp).mockClear();
+    let resolveWorkspace!: (value: { cwd: string }) => void;
+    const workspace = new Promise<{ cwd: string }>((resolve) => {
+      resolveWorkspace = resolve;
+    });
+    const command = acpConversationPromptCommandSchema.parse({
+      type: "acp_conversation.prompt",
+      protocolVersion: 1,
+      operationId: "op-resolve",
+      turnId: "turn-resolve",
+      executionAttemptId: exampleExecutionEnvelopeInput.execution.attemptId,
+      sessionId: "resolve-session",
+      text: "Continue",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      sourceEnvelope: { ...exampleExecutionEnvelopeInput, requiredCapabilities: [] }
+    });
+    const executor = new RemoteAcpExecutor({
+      workspaceResolver: { resolve: () => workspace },
+      runtimeWorkspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+      profileResolver: {
+        resolve: () => ({
+          agentId: command.sourceEnvelope.agentId,
+          capabilityPolicy: { required: [], optional: [] },
+          launch: { command: process.execPath, args: [] },
+          env: {},
+          shutdown: DEFAULT_ACP_SHUTDOWN_POLICY
+        })
+      },
+      outbox: { append: vi.fn() },
+      hostCapabilities: []
+    });
+    const controller = new AbortController();
+    const running = executor.converse(
+      command,
+      { requestPermission: vi.fn(), requestElicitation: vi.fn() },
+      vi.fn(),
+      controller.signal
+    );
+    controller.abort("acp_conversation_deadline_exceeded");
+    await expect(running).rejects.toMatchObject({ message: "acp_conversation_setup_failed" });
+    resolveWorkspace({ cwd: process.cwd() });
+    await Promise.resolve();
+    expect(executeAcp).not.toHaveBeenCalled();
   });
 });

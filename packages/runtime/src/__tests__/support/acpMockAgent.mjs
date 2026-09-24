@@ -87,6 +87,21 @@ function spawnSignalIgnoringDescendant() {
  * only those methods pause. When `pause-at` is absent, every labeled checkpoint pauses.
  */
 async function maybeBarrier(label) {
+  const delayAtPath = controlPath("delay-at");
+  const delayMsPath = controlPath("delay-ms");
+  if (delayAtPath && delayMsPath && existsSync(delayAtPath) && existsSync(delayMsPath)) {
+    const targets = readFileSync(delayAtPath, "utf8")
+      .split(/[\n,]/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (targets.includes(label)) {
+      const milliseconds = Number.parseInt(readFileSync(delayMsPath, "utf8").trim(), 10);
+      if (Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds <= 10_000) {
+        recordLifecycle(`delay ${label}`);
+        await pause(milliseconds);
+      }
+    }
+  }
   const pauseFile = controlPath("pause");
   if (!pauseFile || !existsSync(pauseFile)) return;
   const pauseAtPath = controlPath("pause-at");
@@ -210,9 +225,14 @@ const app = agent({ name: "planweave-acp-mock" })
           scenario === "load-capable" ||
           scenario === "load-capable-error" ||
           scenario === "load-capable-delayed" ||
+          scenario === "load-capable-artifact" ||
+          scenario === "load-auth-capable" ||
+          scenario === "load-capable-permission" ||
+          scenario === "load-capable-elicitation" ||
           scenario === "load-capable-stubborn-child" ||
           scenario === "recovery-permission-artifact",
         ...(scenario === "close-capable" ||
+        scenario === "load-capable-artifact" ||
         scenario === "close-capable-error" ||
         scenario === "session-ready-with-agent-auth-close-pending"
           ? { sessionCapabilities: { close: {} } }
@@ -237,6 +257,7 @@ const app = agent({ name: "planweave-acp-mock" })
                 scenario === "session-ready-with-agent-auth" ||
                 scenario === "session-ready-with-agent-auth-close-pending" ||
                 scenario === "authenticated-with-auth-methods" ||
+                scenario === "load-auth-capable" ||
                 scenario === "authenticated-artifact-implementation" ||
                 scenario === "authenticate-delayed" ||
                 scenario === "authenticate-protocol-error" ||
@@ -292,6 +313,7 @@ const app = agent({ name: "planweave-acp-mock" })
     };
   })
   .onRequest(methods.agent.authenticate, async (ctx) => {
+    await maybeBarrier("authenticate");
     recordLifecycle("authenticate");
     if (
       scenario !== "grok-auth" &&
@@ -299,6 +321,7 @@ const app = agent({ name: "planweave-acp-mock" })
       scenario !== "auth-required" &&
       scenario !== "action-required" &&
       scenario !== "authenticated-with-auth-methods" &&
+      scenario !== "load-auth-capable" &&
       scenario !== "authenticated-artifact-implementation" &&
       scenario !== "authenticate-delayed" &&
       scenario !== "authenticate-protocol-error" &&
@@ -439,16 +462,22 @@ const app = agent({ name: "planweave-acp-mock" })
       : { sessionId };
   })
   .onRequest(methods.agent.session.load, async (ctx) => {
+    await maybeBarrier("session/load");
     recordLifecycle("session/load");
     if (
       scenario !== "load-capable" &&
       scenario !== "load-capable-error" &&
       scenario !== "load-capable-delayed" &&
+      scenario !== "load-capable-artifact" &&
+      scenario !== "load-auth-capable" &&
+      scenario !== "load-capable-permission" &&
+      scenario !== "load-capable-elicitation" &&
       scenario !== "load-capable-stubborn-child" &&
       scenario !== "recovery-permission-artifact"
     ) {
       throw RequestError.invalidParams({ sessionId: ctx.params.sessionId });
     }
+    if (scenario === "load-auth-capable" && !authenticated) throw RequestError.authRequired();
     sessions.set(ctx.params.sessionId, { cancelled: false, recovered: true });
     await ctx.client.notify(methods.client.session.update, {
       sessionId: ctx.params.sessionId,
@@ -465,6 +494,7 @@ const app = agent({ name: "planweave-acp-mock" })
     if (session) session.cancelled = true;
   })
   .onRequest(methods.agent.session.close, async (ctx) => {
+    await maybeBarrier("session/close");
     recordLifecycle("session/close");
     if (scenario === "session-ready-with-agent-auth-close-pending") {
       await new Promise(() => undefined);
@@ -584,6 +614,7 @@ const app = agent({ name: "planweave-acp-mock" })
       scenario === "multi-interaction" ||
       scenario === "artifact-session-config" ||
       scenario === "artifact-session-config-live" ||
+      (scenario === "load-capable-artifact" && session.recovered !== true) ||
       scenario === "recovery-permission-artifact";
     if (
       artifactScenario &&
@@ -605,6 +636,7 @@ const app = agent({ name: "planweave-acp-mock" })
               scenario === "env-auth" ||
               scenario === "artifact-session-config" ||
               scenario === "artifact-session-config-live" ||
+              (scenario === "load-capable-artifact" && session.recovered !== true) ||
               scenario === "delayed-artifact-implementation" ||
               scenario === "terminal-output" ||
               scenario === "permission-deny" ||
@@ -676,6 +708,7 @@ const app = agent({ name: "planweave-acp-mock" })
       scenario === "permission" ||
       scenario === "permission-deny" ||
       scenario === "permission-secret" ||
+      scenario === "load-capable-permission" ||
       scenario === "recovery-permission-artifact"
     ) {
       await ctx.client.notify(methods.client.session.update, {
@@ -694,6 +727,7 @@ const app = agent({ name: "planweave-acp-mock" })
       scenario === "permission" ||
       scenario === "permission-deny" ||
       scenario === "permission-secret" ||
+      scenario === "load-capable-permission" ||
       scenario === "recovery-permission-artifact"
     ) {
       const permission = await ctx.client.request(methods.client.session.requestPermission, {
@@ -745,6 +779,7 @@ const app = agent({ name: "planweave-acp-mock" })
       scenario === "elicitation" ||
       scenario === "unsupported-elicitation" ||
       scenario === "elicitation-secret" ||
+      scenario === "load-capable-elicitation" ||
       scenario === "engine-elicitation-secret"
     ) {
       await ctx.client.request(methods.client.elicitation.create, {

@@ -13,6 +13,7 @@ import {
   type AcpEngineEvent,
   type AcpEngineInteractionBroker,
   type AcpEngineLifecycleEvent,
+  type AcpEngineResult,
   type AcpExecutionLimits,
   type AcpSharedPoolIdentity
 } from "@planweave-ai/runtime";
@@ -52,6 +53,14 @@ type RemoteAcpExecutorOptions = {
 
 export const AGENT_HOST_RESUME_PROMPT =
   "Resume this interrupted PlanWeave execution in the loaded session. First inspect the existing session and workspace state. Do not assume an interrupted operation succeeded or failed, and do not repeat side effects without evidence. Complete only the remaining work you can establish. Prior pending permissions are invalid; request permission again when needed. Complete the required report.";
+
+export type RemoteAcpConversationOutcome = Pick<AcpEngineResult, "terminal" | "cleanup">;
+
+export class RemoteAcpConversationSetupError extends Error {
+  constructor(cause: unknown) {
+    super("acp_conversation_setup_failed", { cause });
+  }
+}
 
 function failure(code: string, message: string, retryable = false): AgentHostExecutionError {
   return new AgentHostExecutionError({ code, message, retryable });
@@ -300,8 +309,39 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
     interactionBroker: AcpEngineInteractionBroker,
     eventSink: (event: AcpEngineEvent) => Promise<void>,
     signal: AbortSignal
-  ) {
-    const { workspace, profile } = await this.resolveContext(command.sourceEnvelope, "load");
+  ): Promise<RemoteAcpConversationOutcome> {
+    let context: Awaited<ReturnType<RemoteAcpExecutor["resolveContext"]>>;
+    try {
+      context = await new Promise<Awaited<ReturnType<RemoteAcpExecutor["resolveContext"]>>>(
+        (resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error("acp_conversation_cancelled"));
+            return;
+          }
+          const abort = () => {
+            signal.removeEventListener("abort", abort);
+            reject(new Error("acp_conversation_cancelled"));
+          };
+          signal.addEventListener("abort", abort, { once: true });
+          void this.resolveContext(command.sourceEnvelope, "load").then(
+            (value) => {
+              signal.removeEventListener("abort", abort);
+              resolve(value);
+            },
+            (error) => {
+              signal.removeEventListener("abort", abort);
+              reject(error);
+            }
+          );
+        }
+      );
+      if (signal.aborted || Date.now() >= Date.parse(command.expiresAt)) {
+        throw new Error("acp_conversation_deadline_exceeded");
+      }
+    } catch (cause) {
+      throw new RemoteAcpConversationSetupError(cause);
+    }
+    const { workspace, profile } = context;
     let prompting = false;
     let configuration: ReturnType<typeof sessionConfigurationFromNewSession> | null = null;
     const result = await executeAcp({
@@ -320,6 +360,8 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
         if (event.kind === "session_ready")
           configuration = sessionConfigurationFromNewSession(event.session);
         if (event.kind === "prompt_starting") {
+          if (signal.aborted || Date.now() >= Date.parse(command.expiresAt))
+            throw new Error("acp_conversation_deadline_exceeded");
           prompting = true;
           if (configuration)
             await eventSink({
@@ -357,7 +399,7 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
         operationTimeoutMs: Math.max(1, Date.parse(command.expiresAt) - Date.now())
       }
     });
-    return result.terminal;
+    return { terminal: result.terminal, cleanup: result.cleanup };
   }
 
   async execute(commandInput: unknown, context: AgentHostExecutionContext) {

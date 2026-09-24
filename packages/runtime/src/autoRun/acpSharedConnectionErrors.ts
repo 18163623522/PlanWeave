@@ -15,6 +15,13 @@ export class AcpSharedConnectionShutdownError extends Error {
   }
 }
 
+export class AcpSharedConnectionCleanupError extends Error {
+  constructor(cause: unknown) {
+    super("ACP shared connection cleanup failed.", { cause });
+    this.name = "AcpSharedConnectionCleanupError";
+  }
+}
+
 export class AcpSharedConnectionAuthRequiredError extends Error {
   constructor(
     readonly outcome: Extract<AcpAuthenticationOutcome, { kind: "auth_required" }>,

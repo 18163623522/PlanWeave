@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAcpConnection } from "../autoRun/acpConnection.js";
+import { createAcpConnection, type AcpConnection } from "../autoRun/acpConnection.js";
 import { createAcpCleanupDeadline } from "../autoRun/acpExecutionCleanup.js";
 import { executeAcp } from "../autoRun/acpExecutionEngine.js";
 import {
@@ -65,6 +68,55 @@ function countingConnect() {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function failingStartup(disposalGate: Promise<void> = Promise.resolve()) {
+  const started = deferred<void>();
+  const disposing = deferred<void>();
+  let starts = 0;
+  const provider = createSharedAcpConnectionProvider({
+    connect: () => {
+      starts += 1;
+      return {
+        processId: 123,
+        pendingOperationCount: 0,
+        pendingOperations: new Map(),
+        stderr: [],
+        closed: new Promise<void>(() => undefined),
+        terminalFailure: null,
+        initialize: (operationOptions) => {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            const abort = () => reject(operationOptions?.signal?.reason);
+            operationOptions?.signal?.addEventListener("abort", abort, { once: true });
+            if (operationOptions?.signal?.aborted) abort();
+          });
+        },
+        authenticate: async () => ({}),
+        newSession: async () => ({ sessionId: "unreachable" }),
+        loadSession: async () => ({}),
+        prompt: async () => ({ stopReason: "end_turn" as const }),
+        cancel: async () => undefined,
+        closeSession: async () => ({}),
+        setSessionMode: async () => ({}),
+        setSessionConfigOption: async () => ({ configOptions: [] }),
+        dispose: async () => {
+          disposing.resolve();
+          await disposalGate;
+          throw new Error("scripted_start_dispose_failure");
+        }
+      } satisfies AcpConnection;
+    }
+  });
+  return { provider, started: started.promise, disposing: disposing.promise, starts: () => starts };
+}
+
 defineAcpConnectionProviderContract("shared-project", () =>
   createSharedAcpConnectionProvider({ idleMs: 20 })
 );
@@ -72,6 +124,7 @@ defineAcpConnectionProviderContract("shared-project", () =>
 describe("shared ACP connection provider", () => {
   const providers: AcpConnectionProvider[] = [];
   const leases: AcpConnectionLease[] = [];
+  const directories: string[] = [];
 
   afterEach(async () => {
     await Promise.all(
@@ -83,11 +136,33 @@ describe("shared ACP connection provider", () => {
       )
     );
     await Promise.all(providers.splice(0).map((provider) => provider.shutdown()));
+    await Promise.all(
+      directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))
+    );
   });
 
   function track(provider: AcpConnectionProvider): AcpConnectionProvider {
     providers.push(provider);
     return provider;
+  }
+
+  async function pausedControl(label: string): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), "acp-shared-start-"));
+    directories.push(directory);
+    await writeFile(join(directory, "pause"), "", "utf8");
+    await writeFile(join(directory, "pause-at"), label, "utf8");
+    return directory;
+  }
+
+  async function waitForPause(directory: string, label: string): Promise<void> {
+    await vi.waitFor(
+      async () => {
+        expect(await readFile(join(directory, "lifecycle.log"), "utf8")).toContain(
+          `paused ${label}`
+        );
+      },
+      { timeout: 5_000 }
+    );
   }
 
   async function acquire(
@@ -112,6 +187,172 @@ describe("shared ACP connection provider", () => {
     expect(first.processId).toBe(second.processId);
     expect(counted.stats()).toEqual({ processes: 1, initializes: 1 });
   });
+
+  it("keeps a shared cold start for another waiter when one is cancelled", async () => {
+    const directory = await pausedControl("initialize");
+    const counted = countingConnect();
+    const provider = track(
+      createSharedAcpConnectionProvider({ connect: counted.connect, idleMs: 20 })
+    );
+    const controller = new AbortController();
+    const request = {
+      ...acquireRequest("success"),
+      launch: {
+        trusted: true as const,
+        command: process.execPath,
+        args: [fixture, "success", "--control-dir", directory]
+      }
+    };
+    const cancelled = provider.acquire({ ...request, signal: controller.signal });
+    const cancelledResult = expect(cancelled).rejects.toBe("first-waiter-cancelled");
+    const surviving = provider.acquire(request);
+    await waitForPause(directory, "initialize");
+    controller.abort("first-waiter-cancelled");
+    await cancelledResult;
+    await unlink(join(directory, "pause"));
+    const lease = await surviving;
+    leases.push(lease);
+    const reused = await provider.acquire(request);
+    leases.push(reused);
+    expect(lease.processId).toBe(reused.processId);
+    expect(counted.stats()).toEqual({ processes: 1, initializes: 1 });
+  }, 10_000);
+
+  it("disposes a cold-start child before rejecting its last cancelled waiter", async () => {
+    const directory = await pausedControl("authenticate");
+    let processId: number | null = null;
+    const provider = track(
+      createSharedAcpConnectionProvider({
+        connect: (options) => {
+          const connection = createAcpConnection(options);
+          processId = connection.processId;
+          return connection;
+        },
+        idleMs: 20
+      })
+    );
+    const controller = new AbortController();
+    const request = {
+      ...acquireRequest("env-auth"),
+      env: { ...environment, PLANWEAVE_T002_TEST_API_KEY: "test-key" },
+      launch: {
+        trusted: true as const,
+        command: process.execPath,
+        args: [fixture, "env-auth", "--control-dir", directory]
+      }
+    };
+    const cancelled = provider.acquire({ ...request, signal: controller.signal });
+    const cancelledResult = expect(cancelled).rejects.toBe("last-waiter-cancelled");
+    await waitForPause(directory, "authenticate");
+    controller.abort("last-waiter-cancelled");
+    await cancelledResult;
+    expect(processId).not.toBeNull();
+    expectProcessExited(processId!);
+  }, 10_000);
+
+  it("reports failed disposal to the last cancelled acquisition and blocks reuse", async () => {
+    const fault = failingStartup();
+    const controller = new AbortController();
+    const request = acquireRequest("success");
+    const first = fault.provider.acquire({ ...request, signal: controller.signal });
+    const firstFailure = expect(first).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    await fault.started;
+    controller.abort("deadline");
+    await firstFailure;
+    await expect(fault.provider.acquire(request)).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    expect(fault.starts()).toBe(1);
+    await expect(fault.provider.shutdown()).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+  });
+
+  it("does not start a replacement while cancelled startup disposal fails", async () => {
+    const gate = deferred<void>();
+    const fault = failingStartup(gate.promise);
+    const controller = new AbortController();
+    const request = acquireRequest("success");
+    const first = fault.provider.acquire({ ...request, signal: controller.signal });
+    const firstFailure = expect(first).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    await fault.started;
+    controller.abort("deadline");
+    await fault.disposing;
+    const second = fault.provider.acquire(request);
+    const secondFailure = expect(second).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    gate.resolve();
+    await Promise.all([firstFailure, secondFailure]);
+    expect(fault.starts()).toBe(1);
+    await expect(fault.provider.shutdown()).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+  });
+
+  it("surfaces failed startup disposal during provider shutdown", async () => {
+    const gate = deferred<void>();
+    const fault = failingStartup(gate.promise);
+    const controller = new AbortController();
+    const first = fault.provider.acquire({
+      ...acquireRequest("success"),
+      signal: controller.signal
+    });
+    const firstFailure = expect(first).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    await fault.started;
+    controller.abort("deadline");
+    await fault.disposing;
+    const shutdownFailure = expect(fault.provider.shutdown()).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    gate.resolve();
+    await Promise.all([firstFailure, shutdownFailure]);
+  });
+
+  it("observes real transport disposal failure after startup cancellation", async () => {
+    const directory = await pausedControl("initialize");
+    let connection: AcpConnection | undefined;
+    const provider = createSharedAcpConnectionProvider({
+      connect: (options) => {
+        connection = createAcpConnection(options);
+        const dispose = connection.dispose.bind(connection);
+        connection.dispose = async (input) => {
+          await dispose(input);
+          throw new Error("scripted_transport_dispose_failure");
+        };
+        return connection;
+      }
+    });
+    const controller = new AbortController();
+    const request = {
+      ...acquireRequest("success"),
+      launch: {
+        trusted: true as const,
+        command: process.execPath,
+        args: [fixture, "success", "--control-dir", directory]
+      }
+    };
+    const first = provider.acquire({ ...request, signal: controller.signal });
+    const firstFailure = expect(first).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+    await waitForPause(directory, "initialize");
+    controller.abort("deadline");
+    await firstFailure;
+    await expect(connection?.dispose()).rejects.toThrow("scripted_transport_dispose_failure");
+    expect(connection?.terminalFailure?.message).toBe(
+      "ACP process termination and cleanup failed."
+    );
+    await expect(provider.shutdown()).rejects.toMatchObject({
+      name: "AcpSharedConnectionCleanupError"
+    });
+  }, 10_000);
 
   it("starts two processes when the pool key differs", async () => {
     const counted = countingConnect();
