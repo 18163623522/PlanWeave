@@ -1,5 +1,5 @@
 import { ManagementDialog } from "../components/ManagementDialog";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useServerManagementAuthorization } from "../hooks/useServerManagementAuthorization";
 import { Button } from "@/components/ui/button";
 import { operatorControlBridge } from "../bridge";
@@ -23,6 +23,7 @@ export function ServerManagementAuthorization({
 }) {
   const {
     status,
+    identityGeneration,
     profiles,
     profileId,
     profile,
@@ -39,9 +40,28 @@ export function ServerManagementAuthorization({
     refresh
   } = useServerManagementAuthorization(serverOrigin);
   const [open, setOpen] = useState(false);
-  const [revokeId, setRevokeId] = useState<string | null>(null);
-  const [recoveryCode, setRecoveryCode] = useState("");
-  const displayedError = error ?? management?.errorCode;
+  const [revokeDraft, setRevokeDraft] = useState<{
+    generation: number;
+    value: string | null;
+  } | null>(null);
+  const [recoveryDraft, setRecoveryDraft] = useState<{
+    generation: number;
+    value: string;
+  } | null>(null);
+  const revokeId = revokeDraft?.generation === identityGeneration ? revokeDraft.value : null;
+  const recoveryCode = recoveryDraft?.generation === identityGeneration ? recoveryDraft.value : "";
+  const setRevokeId = (value: string | null) =>
+    setRevokeDraft({ generation: identityGeneration, value });
+  const setRecoveryCode = (value: string) =>
+    setRecoveryDraft({ generation: identityGeneration, value });
+  useEffect(() => {
+    if (revokeDraft && revokeDraft.generation !== identityGeneration) setRevokeDraft(null);
+    if (recoveryDraft && recoveryDraft.generation !== identityGeneration) setRecoveryDraft(null);
+  }, [identityGeneration, recoveryDraft, revokeDraft]);
+  const displayedError =
+    error ??
+    management?.errorCode ??
+    (profile && !profile.hasOperatorCredential ? "operator_credential_missing" : null);
   const endpointUnavailable = displayedError === "operator_management_upgrade_required";
   const recoveryNeeded = [
     "operator_management_recovery_required",

@@ -451,6 +451,8 @@ export type OperatorProfileView = {
   humanPrincipalId: string | null;
   hasOperatorCredential: boolean;
   operatorCredentialPersistence: OperatorCredentialPersistence;
+  /** Opaque non-secret revision, changed whenever the operator credential is replaced. */
+  credentialRevision: string | null;
   updatedAt: string;
 };
 

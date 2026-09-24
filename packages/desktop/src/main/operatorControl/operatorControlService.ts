@@ -127,6 +127,7 @@ function toPublicProfile(
     hasOperatorCredential: boolean;
     operatorCredentialPersistence: OperatorCredentialPersistence;
     operatorId: string | null;
+    credentialRevision: string | null;
     humanPrincipalId: string | null;
   }
 ): OperatorProfileView {
@@ -141,6 +142,7 @@ function toPublicProfile(
     humanPrincipalId: credential.humanPrincipalId,
     hasOperatorCredential: credential.hasOperatorCredential,
     operatorCredentialPersistence: credential.operatorCredentialPersistence,
+    credentialRevision: credential.credentialRevision,
     updatedAt: profile.updatedAt
   };
 }
@@ -294,6 +296,7 @@ export class OperatorControlService {
           hasOperatorCredential: persistence !== "missing",
           operatorCredentialPersistence: persistence,
           operatorId: metadata?.operatorId ?? null,
+          credentialRevision: metadata?.credentialRevision ?? null,
           humanPrincipalId: humanIdentity?.humanPrincipalId ?? null
         })
       );

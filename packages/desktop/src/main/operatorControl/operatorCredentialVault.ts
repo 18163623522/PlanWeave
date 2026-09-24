@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { operatorTokenSchema } from "@planweave-ai/agent-host-protocol";
 import {
   managementDeviceSecretSchema,
@@ -35,6 +36,7 @@ const persistedOperatorCredentialSchema = z
     encryptedOperatorToken: z.string().trim().min(1),
     encryptedManagementDevice: z.string().min(1).optional(),
     operatorId: z.string().trim().min(1).max(128).nullable(),
+    credentialRevision: z.string().uuid().optional(),
     updatedAt: z.iso.datetime()
   })
   .strict();
@@ -47,11 +49,17 @@ export const operatorCredentialsDocumentSchema = z
   .strict();
 
 export type OperatorCredentialsDocument = z.infer<typeof operatorCredentialsDocumentSchema>;
-type SessionCredential = { operatorToken: string; operatorId: string | null; updatedAt: string };
+type SessionCredential = {
+  operatorToken: string;
+  operatorId: string | null;
+  updatedAt: string;
+  credentialRevision: string;
+};
 
 export type OperatorCredentialVaultPaths = { credentialsPath: string };
 export type StoredOperatorCredentialMetadata = {
   operatorId: string | null;
+  credentialRevision: string;
   updatedAt: string;
 };
 
@@ -206,6 +214,7 @@ export class OperatorCredentialVault {
       this.sessionCredentials.set(profileId, {
         operatorToken: token,
         operatorId: record.operatorId,
+        credentialRevision: record.credentialRevision ?? record.updatedAt,
         updatedAt: record.updatedAt
       });
       return token;
@@ -215,12 +224,21 @@ export class OperatorCredentialVault {
   async getMetadata(profileId: string): Promise<StoredOperatorCredentialMetadata | null> {
     return this.exclusive(async () => {
       const session = this.sessionCredentials.get(profileId);
-      if (session) return { operatorId: session.operatorId, updatedAt: session.updatedAt };
+      if (session)
+        return {
+          operatorId: session.operatorId,
+          credentialRevision: session.credentialRevision,
+          updatedAt: session.updatedAt
+        };
       if (!this.safeStorage.isEncryptionAvailable()) return null;
       const document = await this.draft();
       const record = document.credentials[profileId];
       if (!record) return null;
-      return { operatorId: record.operatorId, updatedAt: record.updatedAt };
+      return {
+        operatorId: record.operatorId,
+        credentialRevision: record.credentialRevision ?? record.updatedAt,
+        updatedAt: record.updatedAt
+      };
     });
   }
 
@@ -255,7 +273,13 @@ export class OperatorCredentialVault {
       const operatorToken = operatorTokenSchema.parse(rawToken);
       const normalizedOperatorId = operatorId?.trim() || null;
       const updatedAt = new Date().toISOString();
-      const session = { operatorToken, operatorId: normalizedOperatorId, updatedAt };
+      const credentialRevision = randomUUID();
+      const session = {
+        operatorToken,
+        operatorId: normalizedOperatorId,
+        updatedAt,
+        credentialRevision
+      };
       if (!this.safeStorage.isEncryptionAvailable()) {
         const document = await this.draft();
         assertCurrent?.();
@@ -272,6 +296,7 @@ export class OperatorCredentialVault {
         ...document.credentials[profileId],
         encryptedOperatorToken: this.encrypt(operatorToken),
         operatorId: normalizedOperatorId,
+        credentialRevision,
         updatedAt
       };
       await this.persist(document);

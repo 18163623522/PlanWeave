@@ -107,6 +107,22 @@ async function fixture(
   };
 }
 
+it("publishes a non-secret credential revision for same-profile replacement and clear", async () => {
+  const f = await fixture(async (url) => normalReply(url), ["https://a.example"]);
+  const first = (await f.service.getStatus()).profiles[0];
+  expect(first.credentialRevision).toMatch(/^[0-9a-f-]{36}$/);
+  await f.vault.setOperatorToken("a", replacement, "admin");
+  const second = (await f.service.getStatus()).profiles[0];
+  expect(second.credentialRevision).not.toBe(first.credentialRevision);
+  expect((await f.reload().getMetadata("a"))?.credentialRevision).toBe(second.credentialRevision);
+  await f.service.clearCredential({ profileId: "a" });
+  const cleared = (await f.service.getStatus()).profiles[0];
+  expect(cleared.credentialRevision).toBeNull();
+  expect(cleared.hasOperatorCredential).toBe(false);
+  expect(JSON.stringify([first, second, cleared])).not.toContain(token);
+  expect(JSON.stringify([first, second, cleared])).not.toContain(replacement);
+});
+
 it("lets B and status finish while A hangs, then allows retry after A's 30-second timeout", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const entered = deferred<void>();
