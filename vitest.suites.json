@@ -211,6 +211,7 @@
         "remoteAcpContinuation.test.tsx",
         "remoteAcpReconciliation.test.tsx",
         "remoteAgentManagementErrors.test.tsx",
+        "remoteAgentCatalogPagination.test.tsx",
         "remoteEndpointDispatchGate.test.ts",
         "remoteLiveRun.test.ts",
         "remoteRunPanel.test.tsx",

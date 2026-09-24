@@ -69,6 +69,7 @@ export function ExecutorsView({
               transport={settings.execution.agentTransport}
               hosts={hosts.hosts}
               remote={remote}
+              policy={remote}
               refreshing={agentDetectionRefreshing}
               onRefresh={() => {
                 void refreshAgentDetections();

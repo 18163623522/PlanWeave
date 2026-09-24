@@ -50,6 +50,7 @@ function toPublicProfile(
     hasDeviceCredential: boolean;
     deviceCredentialPersistence: CollaborationProfileView["deviceCredentialPersistence"];
     deviceCredentialId: string | null;
+    credentialRevision: string | null;
     humanPrincipalId: string | null;
   }
 ): CollaborationProfileView {
@@ -62,6 +63,7 @@ function toPublicProfile(
     hasDeviceCredential: credential.hasDeviceCredential,
     deviceCredentialPersistence: credential.deviceCredentialPersistence,
     deviceCredentialId: credential.deviceCredentialId,
+    credentialRevision: credential.credentialRevision,
     humanPrincipalId: credential.humanPrincipalId,
     updatedAt: profile.updatedAt
   };
@@ -88,6 +90,7 @@ export async function buildCollaborationStatus(
         hasDeviceCredential: persistence !== "missing",
         deviceCredentialPersistence: persistence,
         deviceCredentialId: metadata?.deviceCredentialId ?? null,
+        credentialRevision: metadata?.credentialRevision ?? null,
         humanPrincipalId: metadata?.humanPrincipalId ?? null
       })
     );

@@ -278,6 +278,7 @@ export const activeWorkspaceConnectionViewSchema = z
     workspaceId: workspaceIdSchema.nullable(),
     workspaceDisplayName: workspaceNameSchema.nullable(),
     connectedAt: timestampSchema.nullable(),
+    credentialRevision: z.string().trim().min(1).nullable(),
     error: activeWorkspaceConnectionErrorSchema.nullable()
   })
   .strict()

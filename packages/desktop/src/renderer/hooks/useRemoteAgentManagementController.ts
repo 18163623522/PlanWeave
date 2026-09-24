@@ -1,30 +1,29 @@
-import { useCallback, useEffect, useState } from "react";
-import { collaborationBridge, operatorControlBridge } from "../bridge";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { operatorControlBridge } from "../bridge";
 import { hostAdministrationErrorCode } from "../settings/hostAdministrationErrors";
-import { useCollaborationStatus } from "./useCollaborationStatus";
 import { useOwnerControlPlaneAvailability } from "./useOwnerControlPlaneAvailability";
 import type { OperatorRemoteAgentView } from "../../shared/operatorControl";
+import { useRemoteAgentCatalog, type RemoteAgentCatalog } from "./useRemoteAgentCatalog";
 
-export type RemoteAgentPeopleOption = {
-  humanPrincipalId: string;
-  displayName: string;
-};
+export type {
+  RemoteAgentCatalog,
+  RemoteAgentPeopleOption,
+  RemoteAgentWorkspaceOption
+} from "./useRemoteAgentCatalog";
 
-export type RemoteAgentWorkspaceOption = {
-  workspaceId: string;
-  displayName: string;
-};
-
-export type RemoteAgentManagementController = {
+export type RemoteAgentInventory = {
   agents: OperatorRemoteAgentView[];
-  people: RemoteAgentPeopleOption[];
-  workspaces: RemoteAgentWorkspaceOption[];
   humanPrincipalId: string | null;
   operatorProfileId: string | null;
   loading: boolean;
-  busy: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+};
+
+export type RemoteAgentManagementActions = {
+  busy: boolean;
+  actionError: string | null;
+  retryAction: () => Promise<void>;
   setAccessMode: (
     endpointId: string,
     accessMode: OperatorRemoteAgentView["accessMode"],
@@ -36,63 +35,66 @@ export type RemoteAgentManagementController = {
   repairOwnership: (endpointId: string, ownerHumanPrincipalId: string) => Promise<boolean>;
 };
 
-type WorkspacePickerRow = {
-  workspaceId: string;
-  displayName: string;
-  membershipActive: boolean;
-  archivedAt: string | null;
-};
-
-function collectWorkspaceOptions(input: {
-  pickerItems: readonly WorkspacePickerRow[];
-  canvases: readonly { workspaceId: string; canvasId: string }[];
-  workspaceId: string | null | undefined;
-  workspaceDisplayName: string | null | undefined;
-}): RemoteAgentWorkspaceOption[] {
-  const workspaceNames = new Map<string, string>();
-  if (input.workspaceId && input.workspaceDisplayName) {
-    workspaceNames.set(input.workspaceId, input.workspaceDisplayName);
-  }
-  for (const item of input.pickerItems) {
-    if (!item.membershipActive || item.archivedAt) continue;
-    workspaceNames.set(item.workspaceId, item.displayName);
-  }
-  const canvasesByWorkspace = new Map<string, string[]>();
-  for (const canvas of input.canvases) {
-    const labels = canvasesByWorkspace.get(canvas.workspaceId) ?? [];
-    if (!labels.includes(canvas.canvasId)) labels.push(canvas.canvasId);
-    canvasesByWorkspace.set(canvas.workspaceId, labels);
-  }
-  const workspaceIds = new Set([...workspaceNames.keys(), ...canvasesByWorkspace.keys()]);
-  return [...workspaceIds].map((workspaceId) => {
-    const canvasIds = canvasesByWorkspace.get(workspaceId) ?? [];
-    const workspaceName = workspaceNames.get(workspaceId);
-    const canvasLabel = canvasIds.length === 1 ? canvasIds[0] : "";
-    return {
-      workspaceId,
-      displayName: workspaceName || canvasLabel || workspaceId
-    };
-  });
-}
+export type RemoteAgentManagementController = RemoteAgentInventory &
+  RemoteAgentCatalog &
+  RemoteAgentManagementActions;
 
 export function useRemoteAgentManagementController(): RemoteAgentManagementController {
   const ownerControlPlane = useOwnerControlPlaneAvailability();
-  const { status } = useCollaborationStatus();
   const humanPrincipalId = ownerControlPlane.humanPrincipalId;
   const operatorProfileId = ownerControlPlane.operatorProfileId;
   const [agents, setAgents] = useState<OperatorRemoteAgentView[]>([]);
-  const [people, setPeople] = useState<RemoteAgentPeopleOption[]>([]);
-  const [workspaces, setWorkspaces] = useState<RemoteAgentWorkspaceOption[]>([]);
+  const ownerProfile = ownerControlPlane.status?.profiles.find(
+    (profile) => profile.profileId === operatorProfileId
+  );
+  const catalog = useRemoteAgentCatalog({
+    operatorProfileId,
+    humanPrincipalId,
+    serverBaseUrl: ownerProfile?.serverBaseUrl ?? null
+  });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const inventoryGeneration = useRef(0);
+  const identityGeneration = useRef(0);
+  const inventoryIdentity = JSON.stringify([
+    operatorProfileId,
+    humanPrincipalId,
+    ownerProfile?.serverBaseUrl ?? null,
+    ownerProfile?.hasOperatorCredential ?? false,
+    ownerProfile?.credentialRevision ?? null
+  ]);
+  const activeIdentity = useRef(inventoryIdentity);
+
+  useEffect(() => {
+    activeIdentity.current = inventoryIdentity;
+    identityGeneration.current += 1;
+    inventoryGeneration.current += 1;
+    setAgents([]);
+    setBusy(false);
+    setActionError(null);
+    setError(null);
+    return () => {
+      identityGeneration.current += 1;
+      inventoryGeneration.current += 1;
+    };
+  }, [inventoryIdentity]);
 
   const refresh = useCallback(async () => {
-    if (!operatorControlBridge || !operatorProfileId || !humanPrincipalId) {
+    const generation = ++inventoryGeneration.current;
+    const isCurrent = () =>
+      generation === inventoryGeneration.current && activeIdentity.current === inventoryIdentity;
+    if (
+      !operatorControlBridge ||
+      !operatorProfileId ||
+      !humanPrincipalId ||
+      !ownerProfile?.hasOperatorCredential
+    ) {
       setAgents([]);
-      setPeople([]);
-      setWorkspaces([]);
-      setError(null);
+      setError(
+        ownerProfile?.hasOperatorCredential === false ? "operator_credential_missing" : null
+      );
       setLoading(false);
       return;
     }
@@ -102,66 +104,15 @@ export function useRemoteAgentManagementController(): RemoteAgentManagementContr
         profileId: operatorProfileId,
         humanPrincipalId
       });
+      if (!isCurrent()) return;
       setAgents(list.items);
-      let pickerItems = status?.workspacePicker?.items ?? [];
-      let canvases: { workspaceId: string; canvasId: string }[] = [];
-      const collaboration = collaborationBridge;
-      if (collaboration && status?.session?.phase === "connected") {
-        const [members, picker, projects] = await Promise.all([
-          collaboration.listCollaborationMembers({
-            cursor: 0,
-            limit: 100
-          }),
-          collaboration.listWorkspacePicker({ cursor: 0, limit: 100 }),
-          collaboration.listCollaborationAuthorizedProjects({ cursor: 0, limit: 100 })
-        ]);
-        const canvasPages = await Promise.all(
-          projects.items.map((project) =>
-            collaboration.listCollaborationAuthorizedCanvases({
-              projectId: project.registry.projectId,
-              cursor: 0,
-              limit: 100
-            })
-          )
-        );
-        setPeople(
-          members.items.map((member) => ({
-            humanPrincipalId: member.humanPrincipalId,
-            displayName: member.displayName
-          }))
-        );
-        pickerItems = picker.items;
-        canvases = canvasPages.flatMap((page) =>
-          page.items.map((canvas) => ({
-            workspaceId: canvas.registry.workspaceId,
-            canvasId: canvas.registry.canvasId
-          }))
-        );
-      } else {
-        setPeople([]);
-      }
-      setWorkspaces(
-        collectWorkspaceOptions({
-          pickerItems,
-          canvases,
-          workspaceId: status?.workspaceConnection?.workspaceId,
-          workspaceDisplayName: status?.workspaceConnection?.workspaceDisplayName
-        })
-      );
       setError(null);
     } catch (caught) {
-      setError(hostAdministrationErrorCode(caught));
+      if (isCurrent()) setError(hostAdministrationErrorCode(caught));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [
-    humanPrincipalId,
-    operatorProfileId,
-    status?.session?.phase,
-    status?.workspaceConnection?.workspaceId,
-    status?.workspaceConnection?.workspaceDisplayName,
-    status?.workspacePicker?.items
-  ]);
+  }, [humanPrincipalId, operatorProfileId, inventoryIdentity, ownerProfile?.hasOperatorCredential]);
 
   useEffect(() => {
     void refresh();
@@ -169,51 +120,83 @@ export function useRemoteAgentManagementController(): RemoteAgentManagementContr
 
   const runMutation = useCallback(
     async (action: () => Promise<OperatorRemoteAgentView>): Promise<boolean> => {
-      if (!operatorControlBridge || !operatorProfileId || !humanPrincipalId) return false;
+      if (
+        !operatorControlBridge ||
+        !operatorProfileId ||
+        !humanPrincipalId ||
+        !ownerProfile?.hasOperatorCredential ||
+        activeIdentity.current !== inventoryIdentity
+      )
+        return false;
+      const identity = identityGeneration.current;
       setBusy(true);
       try {
-        await action();
-        await refresh();
+        const changed = await action();
+        if (identity !== identityGeneration.current) return false;
+        setActionError(null);
+        inventoryGeneration.current += 1;
+        setLoading(false);
+        setAgents((current) => {
+          if (changed.ownerHumanPrincipalId !== humanPrincipalId) {
+            return current.filter((agent) => agent.endpointId !== changed.endpointId);
+          }
+          return current.some((agent) => agent.endpointId === changed.endpointId)
+            ? current.map((agent) => (agent.endpointId === changed.endpointId ? changed : agent))
+            : [...current, changed];
+        });
         return true;
       } catch (caught) {
-        setError(hostAdministrationErrorCode(caught));
+        if (identity === identityGeneration.current)
+          setActionError(hostAdministrationErrorCode(caught));
         return false;
       } finally {
-        setBusy(false);
+        if (identity === identityGeneration.current) setBusy(false);
       }
     },
-    [humanPrincipalId, operatorProfileId, refresh]
+    [humanPrincipalId, operatorProfileId, inventoryIdentity, ownerProfile?.hasOperatorCredential]
   );
 
   return {
-    agents,
-    people,
-    workspaces,
+    agents: activeIdentity.current === inventoryIdentity ? agents : [],
+    ...catalog,
     humanPrincipalId,
     operatorProfileId,
-    loading,
+    loading: loading || activeIdentity.current !== inventoryIdentity,
     busy,
-    error,
+    error: activeIdentity.current === inventoryIdentity ? error : null,
+    actionError,
+    retryAction: async () => {
+      setActionError(null);
+      await refresh();
+    },
     refresh,
-    setAccessMode: (endpointId, accessMode, allowOwnerCanvas) =>
-      runMutation(() =>
+    setAccessMode: (endpointId, accessMode, allowOwnerCanvas) => {
+      const current = agents.find((agent) => agent.endpointId === endpointId);
+      return runMutation(() =>
         operatorControlBridge!.setOperatorRemoteAgentAccessMode({
           profileId: operatorProfileId!,
           humanPrincipalId: humanPrincipalId!,
           endpointId,
           accessMode,
-          ...(allowOwnerCanvas === undefined ? {} : { allowOwnerCanvas })
+          ...(allowOwnerCanvas === undefined ? {} : { allowOwnerCanvas }),
+          ...(current ? { expectedPolicyRevision: current.policyRevision } : {})
         })
-      ),
-    grantWorkspace: (endpointId, workspaceId) =>
-      runMutation(() =>
+      );
+    },
+    grantWorkspace: (endpointId, workspaceId) => {
+      const grant = agents
+        .find((agent) => agent.endpointId === endpointId)
+        ?.grants.find((item) => item.workspaceId === workspaceId);
+      return runMutation(() =>
         operatorControlBridge!.grantOperatorRemoteAgentWorkspace({
           profileId: operatorProfileId!,
           humanPrincipalId: humanPrincipalId!,
           endpointId,
-          workspaceId
+          workspaceId,
+          ...(grant ? { expectedGrantRevision: grant.grantRevision } : {})
         })
-      ),
+      );
+    },
     revokeGrant: (endpointId, workspaceId) =>
       runMutation(() =>
         operatorControlBridge!.revokeOperatorRemoteAgentGrant({

@@ -62,6 +62,43 @@ afterEach(async () => {
 });
 
 describe("safeStorage credential access", () => {
+  it("assigns a new nonsecret revision on replacement and reads legacy credentials", async () => {
+    const directory = await temporaryDirectory("planweave-collaboration-revision-");
+    const credentialsPath = join(directory, "credentials.json");
+    const vault = new CollaborationCredentialVault({
+      paths: { credentialsPath },
+      safeStorage: availableSafeStorage()
+    });
+    await vault.setDeviceToken("profile-1", exampleHumanDeviceToken, {
+      deviceCredentialId: "device-1",
+      humanPrincipalId: "human-1"
+    });
+    const first = (await vault.getMetadata("profile-1"))?.credentialRevision;
+    await vault.setDeviceToken("profile-1", exampleHumanDeviceToken, {
+      deviceCredentialId: "device-1",
+      humanPrincipalId: "human-1"
+    });
+    const second = (await vault.getMetadata("profile-1"))?.credentialRevision;
+    expect(first).toBeTruthy();
+    expect(second).not.toBe(first);
+    const document = JSON.parse(await readFile(credentialsPath, "utf8"));
+    delete document.credentials["profile-1"].credentialRevision;
+    await writeFile(credentialsPath, JSON.stringify(document), "utf8");
+    const legacy = new CollaborationCredentialVault({
+      paths: { credentialsPath },
+      safeStorage: availableSafeStorage()
+    });
+    expect((await legacy.getMetadata("profile-1"))?.credentialRevision).toBe(
+      document.credentials["profile-1"].updatedAt
+    );
+    await legacy.setDeviceToken("profile-1", exampleHumanDeviceToken);
+    expect((await legacy.getMetadata("profile-1"))?.credentialRevision).not.toBe(
+      document.credentials["profile-1"].updatedAt
+    );
+    await legacy.clear("profile-1");
+    expect(await legacy.getMetadata("profile-1")).toBeNull();
+  });
+
   it("reads collaboration credential status without decrypting and preserves denied ciphertext", async () => {
     const directory = await temporaryDirectory("planweave-collaboration-keychain-");
     const credentialsPath = join(directory, "credentials.json");

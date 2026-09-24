@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ManagementDialog } from "../components/ManagementDialog";
 import type { createTranslator } from "../i18n";
-import type { RemoteAgentManagementController } from "../hooks/useRemoteAgentManagementController";
+import type {
+  RemoteAgentCatalog,
+  RemoteAgentInventory,
+  RemoteAgentManagementActions
+} from "../hooks/useRemoteAgentManagementController";
 import { RemoteAgentPolicyEditor } from "../settings/RemoteAgentPolicyEditor";
 import { formatHostAdministrationError } from "../settings/hostAdministrationErrors";
 import { executorDisplayName } from "./executorOptionViewModel";
@@ -16,6 +20,7 @@ export function ExecutorInventory({
   transport,
   hosts,
   remote,
+  policy,
   refreshing,
   onRefresh,
   onConfigure,
@@ -24,7 +29,8 @@ export function ExecutorInventory({
   agents: DesktopAgentDetection[];
   transport: RunnerTransport;
   hosts: readonly OperatorHostView[];
-  remote: RemoteAgentManagementController;
+  remote: RemoteAgentInventory;
+  policy: RemoteAgentCatalog & RemoteAgentManagementActions;
   refreshing: boolean;
   onRefresh: () => void;
   onConfigure: () => void;
@@ -147,11 +153,7 @@ export function ExecutorInventory({
                       : host.availability.reason
                         ? t(`hostAvailability_${host.availability.reason}`)
                         : t("executorsDeviceUnknown");
-            const grants = agent.grants.map(
-              (grant) =>
-                remote.workspaces.find((workspace) => workspace.workspaceId === grant.workspaceId)
-                  ?.displayName ?? grant.workspaceId
-            );
+            const grants = agent.grants.map((grant) => grant.workspaceId);
             const scope = [
               agent.allowOwnerCanvas !== false ? t("executorsLocalScope") : null,
               agent.accessMode === "unrestricted"
@@ -225,7 +227,7 @@ export function ExecutorInventory({
             showHeading={false}
             key={selected.endpointId}
             agent={selected}
-            panel={remote}
+            panel={policy}
             t={t}
           />
         ) : null}

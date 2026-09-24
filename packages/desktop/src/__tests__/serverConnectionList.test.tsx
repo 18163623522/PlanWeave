@@ -26,6 +26,7 @@ let connection = activeWorkspaceConnectionViewSchema.parse({
   workspaceId: "team",
   workspaceDisplayName: "Team",
   connectedAt: "2030-01-01T00:00:00.000Z",
+  credentialRevision: "active-device-revision",
   error: null
 });
 const operatorControlBridge = vi.hoisted(() => ({

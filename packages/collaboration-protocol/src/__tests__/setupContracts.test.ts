@@ -297,6 +297,18 @@ describe("OSS-005 setup-code and single-connection contracts", () => {
       exampleWorkspaceConnectionProfile.workspaceId
     );
     expect(exampleWorkspacePickerPage.items).toHaveLength(2);
+    const redactedConnection = activeWorkspaceConnectionViewSchema.parse({
+      ...exampleActiveWorkspaceConnectionConnected,
+      credentialRevision: "revision-without-secret"
+    });
+    expect(redactedConnection.credentialRevision).toBe("revision-without-secret");
+    assertSetupViewRedacted(redactedConnection);
+    expect(() =>
+      activeWorkspaceConnectionViewSchema.parse({
+        ...exampleActiveWorkspaceConnectionConnected,
+        deviceToken: "not-allowed"
+      })
+    ).toThrow();
 
     expect(() =>
       activeWorkspaceConnectionViewSchema.parse({
@@ -306,6 +318,7 @@ describe("OSS-005 setup-code and single-connection contracts", () => {
         workspaceId: "workspace-demo-001",
         workspaceDisplayName: "PlanWeave Demo",
         connectedAt: null,
+        credentialRevision: null,
         error: null
       })
     ).toThrow();
@@ -318,6 +331,7 @@ describe("OSS-005 setup-code and single-connection contracts", () => {
         workspaceId: "workspace-other-001",
         workspaceDisplayName: "Other",
         connectedAt: "2030-01-01T00:05:00.000Z",
+        credentialRevision: "revision-without-secret",
         error: null
       })
     ).toThrow();

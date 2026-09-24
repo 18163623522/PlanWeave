@@ -208,6 +208,8 @@ export class CollaborationWorkspaceConnection {
       return view;
     }
     const profile = toPublicProfile(stored);
+    const credentialRevision =
+      (await this.vault.getMetadata(stored.profileId))?.credentialRevision ?? null;
     const view = activeWorkspaceConnectionViewSchema.parse({
       schemaVersion: "workspace-setup/v1",
       status: this.status,
@@ -222,6 +224,7 @@ export class CollaborationWorkspaceConnection {
       workspaceId: stored.workspaceId,
       workspaceDisplayName: this.workspaceDisplayName ?? stored.workspaceDisplayName,
       connectedAt: this.connectedAt,
+      credentialRevision,
       error: this.error
     });
     // connected/reconnecting require profile+workspace; disconnected/error/connecting allow profile
@@ -234,6 +237,7 @@ export class CollaborationWorkspaceConnection {
         workspaceId: stored.workspaceId,
         workspaceDisplayName: this.workspaceDisplayName ?? stored.workspaceDisplayName,
         connectedAt: this.connectedAt,
+        credentialRevision,
         error: this.error
       };
       // Schema only requires profile for connected/reconnecting; disconnected may include profile.

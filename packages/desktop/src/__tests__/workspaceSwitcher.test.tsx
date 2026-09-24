@@ -22,6 +22,7 @@ const connection = activeWorkspaceConnectionViewSchema.parse({
   workspaceId: "team",
   workspaceDisplayName: "Team",
   connectedAt: "2030-01-01T00:00:00.000Z",
+  credentialRevision: "remote-device-revision",
   error: null
 });
 afterEach(cleanup);

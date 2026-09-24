@@ -827,6 +827,7 @@ export const exampleActiveWorkspaceConnectionLocalOnly = activeWorkspaceConnecti
   workspaceId: null,
   workspaceDisplayName: null,
   connectedAt: null,
+  credentialRevision: null,
   error: null
 });
 
@@ -837,6 +838,7 @@ export const exampleActiveWorkspaceConnectionConnected = activeWorkspaceConnecti
   workspaceId: "workspace-demo-001",
   workspaceDisplayName: "PlanWeave Demo",
   connectedAt: "2030-01-01T00:05:00.000Z",
+  credentialRevision: "fixture-credential-revision",
   error: null
 });
 

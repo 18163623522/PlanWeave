@@ -50,8 +50,30 @@ export function RemoteAgentManagementCard({
   controller,
   hosts = []
 }: RemoteAgentManagementCardProps) {
+  return controller ? (
+    <RemoteAgentManagementCardView t={t} panel={controller} hosts={hosts} />
+  ) : (
+    <OwnedRemoteAgentManagementCard t={t} hosts={hosts} />
+  );
+}
+
+function OwnedRemoteAgentManagementCard({
+  t,
+  hosts
+}: Omit<RemoteAgentManagementCardProps, "controller">) {
   const owned = useRemoteAgentManagementController();
-  const panel = controller ?? owned;
+  return <RemoteAgentManagementCardView t={t} panel={owned} hosts={hosts ?? []} />;
+}
+
+function RemoteAgentManagementCardView({
+  t,
+  panel,
+  hosts
+}: {
+  t: ReturnType<typeof createTranslator>;
+  panel: RemoteAgentManagementController;
+  hosts: readonly OperatorHostView[];
+}) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
   const devices = useMemo(
     () => buildRemoteAgentDeviceGroups({ agents: panel.agents, hosts }),

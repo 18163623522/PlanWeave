@@ -11,6 +11,17 @@ export const remoteAgentManagementEnCatalog = {
   remoteAgentManagementPermissions: "Access and grants",
   remoteAgentManagementRefresh: "Refresh",
   remoteAgentManagementLoading: "Loading Remote Agents…",
+  remoteAgentManagementCatalogLoading: "Loading management options…",
+  remoteAgentManagementCatalogError: "Management options are unavailable",
+  remoteAgentManagementCatalogRetry: "Retry options",
+  remoteAgentManagementPeopleError: "People options are unavailable",
+  remoteAgentManagementCursorError: "The Server returned an invalid directory page cursor.",
+  remoteAgentManagementIdentityError:
+    "Connect a Workspace profile for this Agent owner and Server to load management options.",
+  remoteAgentManagementLoadMorePeople: "Load more people",
+  remoteAgentManagementLoadMoreWorkspaces: "Load more workspaces",
+  remoteAgentManagementRevisionConflict:
+    "This policy changed on the Server. Refresh the Agent and try again.",
   remoteAgentManagementEmpty: "No Remote Agents are registered for this person yet.",
   remoteAgentManagementNoPrincipal:
     "Connect a Workspace profile so Desktop can identify you as the Agent owner.",

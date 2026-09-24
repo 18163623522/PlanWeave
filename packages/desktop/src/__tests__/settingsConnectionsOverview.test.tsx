@@ -51,7 +51,10 @@ const operatorControlBridge = vi.hoisted(() => ({
       {
         profileId: "admin",
         operatorId: "owner",
-        serverBaseUrl: "https://planweave.tailnet.ts.net/"
+        serverBaseUrl: "https://planweave.tailnet.ts.net/",
+        hasOperatorCredential: true,
+        operatorCredentialPersistence: "persisted",
+        credentialRevision: "admin-credential-revision"
       }
     ]
   }),
@@ -122,6 +125,7 @@ describe("SettingsConnectionsSection overview Server row", () => {
         workspaceId: "workspace-1",
         workspaceDisplayName: "Configured workspace",
         connectedAt: "2030-01-01T00:00:00.000Z",
+        credentialRevision: "workspace-device-revision",
         error: null
       },
       workspacePicker: {

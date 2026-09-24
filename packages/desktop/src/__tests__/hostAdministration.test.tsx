@@ -40,7 +40,13 @@ vi.mock("../renderer/hooks/useCollaborationStatus", () => ({
   useCollaborationStatus: () => ({
     status: {
       activeProfileId: "collab-1",
-      profiles: [{ profileId: "collab-1", humanPrincipalId: "owner-human-1" }],
+      profiles: [
+        {
+          profileId: "collab-1",
+          serverBaseUrl: "https://server.example/",
+          humanPrincipalId: "owner-human-1"
+        }
+      ],
       session: { phase: "connected" }
     },
     loading: false,
@@ -295,6 +301,20 @@ describe("Agent Host settings", () => {
       ],
       people: [],
       workspaces: [],
+      peopleNextCursor: null,
+      peopleLoading: false,
+      peopleError: null,
+      loadMorePeople: vi.fn().mockResolvedValue(undefined),
+      retryPeople: vi.fn().mockResolvedValue(undefined),
+      workspacesNextCursor: null,
+      workspacesLoading: false,
+      workspacesError: null,
+      loadMoreWorkspaces: vi.fn().mockResolvedValue(undefined),
+      retryWorkspaces: vi.fn().mockResolvedValue(undefined),
+      acquireCatalog: vi.fn(),
+      releaseCatalog: vi.fn(),
+      actionError: null,
+      retryAction: vi.fn().mockResolvedValue(undefined),
       humanPrincipalId: "owner-human-1",
       operatorProfileId: "profile-a",
       loading: false,
@@ -355,6 +375,20 @@ describe("Agent Host settings", () => {
         { workspaceId: "workspace-notes", displayName: "tiny-notes" },
         { workspaceId: "workspace-demo", displayName: "PlanWeave Demo" }
       ],
+      peopleNextCursor: null,
+      peopleLoading: false,
+      peopleError: null,
+      loadMorePeople: vi.fn().mockResolvedValue(undefined),
+      retryPeople: vi.fn().mockResolvedValue(undefined),
+      workspacesNextCursor: null,
+      workspacesLoading: false,
+      workspacesError: null,
+      loadMoreWorkspaces: vi.fn().mockResolvedValue(undefined),
+      retryWorkspaces: vi.fn().mockResolvedValue(undefined),
+      acquireCatalog: vi.fn(),
+      releaseCatalog: vi.fn(),
+      actionError: null,
+      retryAction: vi.fn().mockResolvedValue(undefined),
       humanPrincipalId: "owner-human-1",
       operatorProfileId: "profile-a",
       loading: false,

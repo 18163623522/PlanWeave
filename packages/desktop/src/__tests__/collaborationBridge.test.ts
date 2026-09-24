@@ -427,6 +427,7 @@ describe("CollaborationService IPC trust boundary", () => {
 
     expect(request).toHaveBeenCalledTimes(3);
     expect(status.workspaceConnection.status).toBe("connected");
+    expect(status.workspaceConnection.credentialRevision).toMatch(/^[0-9a-f-]{36}$/);
     expect(status.workspaceConnection.workspaceId).toBe(
       exampleSetupCodeRedeemDeviceResponse.connectionProfile.workspaceId
     );
@@ -440,7 +441,9 @@ describe("CollaborationService IPC trust boundary", () => {
     const profileJson = await readFile(join(root, "workspace-profiles.json"), "utf8");
     expect(profileJson).not.toContain(exampleSetupCodeRedeemDeviceResponse.deviceToken);
     await service.disconnectWorkspaceConnection();
-    expect((await service.getStatus()).workspaceConnection.status).toBe("local_only");
+    const localOnly = await service.getStatus();
+    expect(localOnly.workspaceConnection.status).toBe("local_only");
+    expect(localOnly.workspaceConnection.credentialRevision).toBeNull();
   });
 
   it("remembers a connected Server after disconnect and reconnects it as the last remote", async () => {

@@ -104,6 +104,48 @@ describe("workspace connection HTTP", () => {
     expect(JSON.stringify(page)).not.toMatch(/projectRoot|credential|token|secret/i);
   });
 
+  it("pages the 101st active Workspace membership through the authenticated picker", async () => {
+    const { database, origin, token, workspaceId } = await setup();
+    const identity = new WorkspaceIdentityRepository(database);
+    const humanPrincipalId = "human-workspace-connection";
+    const now = new Date().toISOString();
+    for (let index = 0; index < 100; index += 1) {
+      const nextWorkspaceId = identity.ensureWorkspaceForLegacyProject(`project-page-${index}`);
+      database
+        .prepare(
+          "INSERT INTO workspace_principals(workspace_id,human_principal_id,display_name,created_at,revoked_at) VALUES(?,?,?,?,NULL)"
+        )
+        .run(nextWorkspaceId, humanPrincipalId, "Workspace Device", now);
+      database
+        .prepare(
+          "INSERT INTO workspace_memberships(workspace_id,membership_id,human_principal_id,role,revision,created_at,updated_at,revoked_at) VALUES(?,?,?,?,1,?,?,NULL)"
+        )
+        .run(nextWorkspaceId, `membership-page-${index}`, humanPrincipalId, "member", now, now);
+    }
+    const getPage = async (cursor: number) => {
+      const response = await fetch(
+        `${origin}/api/v1/workspace-connection?cursor=${cursor}&limit=100`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+      expect(response.status).toBe(200);
+      return response.json() as Promise<{
+        items: Array<{ workspaceId: string }>;
+        nextCursor: number | null;
+      }>;
+    };
+    const first = await getPage(0);
+    const second = await getPage(100);
+    expect(first.items).toHaveLength(100);
+    expect(first.nextCursor).toBe(100);
+    expect(second.items).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+    expect([...first.items, ...second.items].map((item) => item.workspaceId)).toContain(
+      workspaceId
+    );
+  });
+
   it("accepts active non-expiring Workspace device sessions", async () => {
     const { database, origin, token } = await setup();
     database

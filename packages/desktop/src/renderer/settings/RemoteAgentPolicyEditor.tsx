@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ShieldCheckIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,8 +11,12 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import type { createTranslator } from "../i18n";
-import type { RemoteAgentManagementController } from "../hooks/useRemoteAgentManagementController";
+import type {
+  RemoteAgentCatalog,
+  RemoteAgentManagementActions
+} from "../hooks/useRemoteAgentManagementController";
 import type { OperatorRemoteAgentView } from "../../shared/operatorControl";
+import { formatHostAdministrationError } from "./hostAdministrationErrors";
 
 export function RemoteAgentPolicyEditor({
   agent,
@@ -21,11 +25,16 @@ export function RemoteAgentPolicyEditor({
   showHeading = true
 }: {
   agent: OperatorRemoteAgentView;
-  panel: RemoteAgentManagementController;
+  panel: RemoteAgentCatalog & RemoteAgentManagementActions;
   t: ReturnType<typeof createTranslator>;
   showHeading?: boolean;
 }) {
   const [repairOwnerId, setRepairOwnerId] = useState("");
+  useEffect(() => {
+    const scope = agent.ownershipRepairRequired ? "people" : "workspaces";
+    panel.acquireCatalog(scope);
+    return () => panel.releaseCatalog(scope);
+  }, [agent.ownershipRepairRequired, panel.acquireCatalog, panel.releaseCatalog]);
   const disabled = panel.busy || Boolean(agent.revokedAt);
   const grantedIds = new Set(agent.grants.map((grant) => grant.workspaceId));
   const workspaces = [
@@ -45,6 +54,69 @@ export function RemoteAgentPolicyEditor({
       {showHeading ? <h3 className="font-medium">{agent.displayName}</h3> : null}
       {agent.revokedAt ? (
         <p className="text-sm text-text-muted">{t("remoteAgentManagementRevoked")}</p>
+      ) : null}
+      {panel.peopleLoading || panel.workspacesLoading ? (
+        <p className="text-sm text-text-muted" role="status">
+          {t("remoteAgentManagementCatalogLoading")}
+        </p>
+      ) : null}
+      {panel.peopleError && agent.ownershipRepairRequired ? (
+        <div className="flex items-center gap-3" data-testid="remote-agent-catalog-error">
+          <p className="text-sm text-destructive" role="alert">
+            {t("remoteAgentManagementPeopleError")}:{" "}
+            {panel.peopleError === "remote_agent_catalog_cursor_invalid"
+              ? t("remoteAgentManagementCursorError")
+              : panel.peopleError === "remote_agent_catalog_identity_unavailable"
+                ? t("remoteAgentManagementIdentityError")
+                : formatHostAdministrationError(panel.peopleError, t)}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void panel.retryPeople()}
+          >
+            {t("remoteAgentManagementCatalogRetry")}
+          </Button>
+        </div>
+      ) : null}
+      {panel.workspacesError && !agent.ownershipRepairRequired ? (
+        <div className="flex items-center gap-3" data-testid="remote-agent-catalog-error">
+          <p className="text-sm text-destructive" role="alert">
+            {t("remoteAgentManagementCatalogError")}:{" "}
+            {panel.workspacesError === "remote_agent_catalog_cursor_invalid"
+              ? t("remoteAgentManagementCursorError")
+              : panel.workspacesError === "remote_agent_catalog_identity_unavailable"
+                ? t("remoteAgentManagementIdentityError")
+                : formatHostAdministrationError(panel.workspacesError, t)}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void panel.retryWorkspaces()}
+          >
+            {t("remoteAgentManagementCatalogRetry")}
+          </Button>
+        </div>
+      ) : null}
+      {panel.actionError ? (
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-destructive" role="alert">
+            {formatHostAdministrationError(panel.actionError, t)}
+          </p>
+          {panel.actionError === "remote_agent_policy_revision_conflict" ||
+          panel.actionError === "remote_agent_grant_revision_conflict" ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void panel.retryAction()}
+            >
+              {t("remoteAgentManagementRefresh")}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {agent.ownershipRepairRequired ? (
         <div className="flex flex-col gap-3" data-testid="remote-agent-repair">
@@ -75,6 +147,17 @@ export function RemoteAgentPolicyEditor({
               data-testid="remote-agent-repair-owner"
             />
           )}
+          {panel.peopleNextCursor !== null && !panel.peopleError ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={panel.peopleLoading}
+              onClick={() => void panel.loadMorePeople()}
+            >
+              {t("remoteAgentManagementLoadMorePeople")}
+            </Button>
+          ) : null}
           <Button
             size="sm"
             className="self-start"
@@ -177,9 +260,21 @@ export function RemoteAgentPolicyEditor({
                     />
                   </div>
                 ))
-              ) : (
+              ) : !panel.workspacesLoading && !panel.workspacesError ? (
                 <p className="py-4 text-xs text-text-muted">{t("remoteAgentManagementNoGrants")}</p>
-              )}
+              ) : null}
+              {panel.workspacesNextCursor !== null && !panel.workspacesError ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="my-3"
+                  disabled={panel.workspacesLoading}
+                  onClick={() => void panel.loadMoreWorkspaces()}
+                >
+                  {t("remoteAgentManagementLoadMoreWorkspaces")}
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-4">

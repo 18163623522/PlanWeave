@@ -202,6 +202,7 @@ type CollaborationProfileViewBase = {
   hasDeviceCredential: boolean;
   deviceCredentialPersistence: CollaborationCredentialPersistence;
   deviceCredentialId: string | null;
+  credentialRevision: string | null;
   humanPrincipalId: string | null;
   updatedAt: string;
 };

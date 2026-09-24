@@ -50,7 +50,9 @@ const knownErrorCodes = new Set([
   "agent_host_windows_user_sid_unavailable",
   "agent_host_preset_binary_missing",
   "agent_host_background_setup_required",
-  "human_principal_unavailable"
+  "human_principal_unavailable",
+  "remote_agent_policy_revision_conflict",
+  "remote_agent_grant_revision_conflict"
 ]);
 
 function knownErrorCode(value: string): string | null {
@@ -90,6 +92,12 @@ export function formatHostAdministrationError(
   t: ReturnType<typeof createTranslator>
 ): string | null {
   if (!code) return null;
+  if (
+    code === "remote_agent_policy_revision_conflict" ||
+    code === "remote_agent_grant_revision_conflict"
+  ) {
+    return t("remoteAgentManagementRevisionConflict");
+  }
   if (Object.hasOwn(managementErrors, code))
     return t(managementErrors[code as keyof typeof managementErrors]);
   if (code === "local_agent_host_unavailable") {

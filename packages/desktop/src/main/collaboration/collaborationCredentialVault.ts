@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import {
   humanDeviceTokenSchema,
@@ -21,6 +22,7 @@ export type CollaborationSafeStoragePort = {
 };
 
 export type StoredCredentialMetadata = {
+  credentialRevision: string;
   deviceCredentialId: string | null;
   identityCredentialId: string | null;
   humanPrincipalId: string | null;
@@ -39,6 +41,7 @@ const persistedCredentialRecordV1Schema = z
 
 const persistedCredentialRecordSchema = persistedCredentialRecordV1Schema
   .extend({
+    credentialRevision: z.string().uuid().optional(),
     encryptedIdentityToken: z.string().trim().min(1).nullable(),
     identityCredentialId: opaqueIdentifierSchema.nullable(),
     identityExpiresAt: timestampSchema.nullable().optional()
@@ -85,6 +88,7 @@ export type CollaborationCredentialsDocument = z.infer<
 type CredentialsDocument = CollaborationCredentialsDocument;
 
 type SessionCredential = {
+  credentialRevision: string;
   deviceToken: string;
   identityToken: string | null;
   deviceCredentialId: string | null;
@@ -262,6 +266,7 @@ export class CollaborationCredentialVault {
         : this.decryptIdentityToken(record.encryptedIdentityToken);
     // Cache decrypted token in memory for the process lifetime (still encrypted on disk).
     this.sessionTokens.set(profileId, {
+      credentialRevision: record.credentialRevision ?? record.updatedAt,
       deviceToken: token,
       identityToken,
       deviceCredentialId: record.deviceCredentialId,
@@ -286,6 +291,7 @@ export class CollaborationCredentialVault {
     const session = this.sessionTokens.get(profileId);
     if (session) {
       return {
+        credentialRevision: session.credentialRevision,
         deviceCredentialId: session.deviceCredentialId,
         identityCredentialId: session.identityCredentialId,
         humanPrincipalId: session.humanPrincipalId,
@@ -302,6 +308,7 @@ export class CollaborationCredentialVault {
       return null;
     }
     return {
+      credentialRevision: record.credentialRevision ?? record.updatedAt,
       deviceCredentialId: record.deviceCredentialId,
       identityCredentialId: record.identityCredentialId,
       humanPrincipalId: record.humanPrincipalId,
@@ -403,6 +410,7 @@ export class CollaborationCredentialVault {
         : metadata.identityExpiresAt;
 
     const sessionCredential: SessionCredential = {
+      credentialRevision: randomUUID(),
       deviceToken: token,
       identityToken,
       deviceCredentialId,
@@ -423,6 +431,7 @@ export class CollaborationCredentialVault {
     }
 
     document.credentials[profileId] = {
+      credentialRevision: sessionCredential.credentialRevision,
       encryptedDeviceToken: this.encrypt(token),
       encryptedIdentityToken: identityToken === null ? null : this.encrypt(identityToken),
       deviceCredentialId,

@@ -17,6 +17,7 @@ export function localOnlyView(): ActiveWorkspaceConnectionView {
     workspaceId: null,
     workspaceDisplayName: null,
     connectedAt: null,
+    credentialRevision: null,
     error: null
   });
 }
