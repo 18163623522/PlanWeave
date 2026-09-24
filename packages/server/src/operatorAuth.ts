@@ -103,6 +103,11 @@ export class OperatorTokenRegistry implements RemoteInteractionAuthorizationPort
       operatorSessionId: session.operatorSessionId,
       expiresAt: session.expiresAt
     });
+    try {
+      this.observedSessions(principal.operatorId);
+    } catch {
+      return undefined;
+    }
     const sessions = this.principals.get(principal.operatorId) ?? new Map();
     sessions.set(principal.operatorSessionId, principal);
     this.principals.set(principal.operatorId, sessions);
@@ -136,26 +141,31 @@ export class OperatorTokenRegistry implements RemoteInteractionAuthorizationPort
 
   canRespond(input: { responderId: string; workspaceId: string; projectId: string }): boolean {
     const sessions = this.principals.get(input.responderId);
-    return Boolean(
-      sessions &&
-        [...sessions.values()].some((principal) => {
-          const session = this.sessions.findBySessionId(
-            principal.workspaceId,
-            principal.operatorSessionId
-          );
-          if (!session || !this.sessions.authenticateDigest(session.credentialSha256)) return false;
-          const credential =
-            this.credentials.find(
-              (candidate) =>
-                candidate.credential.operatorId === session.operatorId &&
-                candidate.credential.tokenSha256 === session.credentialSha256
-            )?.credential ?? this.management.delegatedCredential(session.credentialSha256);
-          return Boolean(
-            credential?.serverAdmin ||
-              (session.workspaceId === input.workspaceId &&
-                credential?.projectIds.includes(input.projectId))
-          );
-        })
-    );
+    if (!sessions) return false;
+    return this.observedSessions(input.responderId).some((session) => {
+      const credential =
+        this.credentials.find(
+          (candidate) =>
+            candidate.credential.operatorId === session.operatorId &&
+            candidate.credential.tokenSha256 === session.credentialSha256
+        )?.credential ?? this.management.delegatedCredential(session.credentialSha256);
+      return Boolean(
+        credential?.serverAdmin ||
+          (session.workspaceId === input.workspaceId &&
+            credential?.projectIds.includes(input.projectId))
+      );
+    });
+  }
+
+  private observedSessions(operatorId: string): OperatorSession[] {
+    const bucket = this.principals.get(operatorId);
+    if (!bucket) return [];
+    const usable = this.sessions.findUsableObserved(operatorId, [...bucket.values()]);
+    const usableIds = new Set<string>(usable.map((session) => session.operatorSessionId));
+    for (const sessionId of bucket.keys()) {
+      if (!usableIds.has(sessionId)) bucket.delete(sessionId);
+    }
+    if (bucket.size === 0) this.principals.delete(operatorId);
+    return usable;
   }
 }

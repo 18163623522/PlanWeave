@@ -118,6 +118,56 @@ export class OperatorSessionStore {
     return row ? this.parseRow(row) : undefined;
   }
 
+  findUsableObserved(
+    operatorId: string,
+    observed: readonly { workspaceId: string; operatorSessionId: string }[]
+  ): OperatorSession[] {
+    if (observed.length === 0) return [];
+    const parsedOperatorId = operatorIdSchema.parse(operatorId);
+    const now = this.clock();
+    const sessions: OperatorSession[] = [];
+    // Each pair uses two parameters; stay below SQLite's 999-variable minimum limit.
+    for (let offset = 0; offset < observed.length; offset += 400) {
+      const batch = observed.slice(offset, offset + 400);
+      const pairs = batch.map(() => "(?,?)").join(",");
+      const values = batch.flatMap(({ workspaceId, operatorSessionId }) => [
+        workspaceIdSchema.parse(workspaceId),
+        operatorSessionIdSchema.parse(operatorSessionId)
+      ]);
+      const rows = this.database
+        .prepare(
+          `SELECT workspace_id,operator_session_id,operator_id,credential_sha256,
+                  issued_at,expires_at,revoked_at
+           FROM workspace_operator_sessions
+           WHERE (workspace_id,operator_session_id) IN (${pairs})
+             AND operator_id=? AND revoked_at IS NULL
+             AND julianday(expires_at)>julianday(?)`
+        )
+        .all(...values, parsedOperatorId, now.toISOString());
+      for (const row of rows) {
+        const session = this.parseRow(row);
+        if (
+          !evaluateOperatorSessionUsability({ session, workspaceId: session.workspaceId, now })
+            .usable
+        )
+          continue;
+        try {
+          this.assertWorkspaceCutover(session.workspaceId);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error.message === "workspace_not_found" ||
+              error.message === "workspace_identity_read_cutover_incomplete")
+          )
+            continue;
+          throw error;
+        }
+        sessions.push(session);
+      }
+    }
+    return sessions;
+  }
+
   /** Legacy issuer lookup; resolves only one durable operator session ID. */
   findBySessionIdAcrossWorkspaces(operatorSessionId: string): OperatorSession | undefined {
     const parsedSessionId = operatorSessionIdSchema.parse(operatorSessionId);

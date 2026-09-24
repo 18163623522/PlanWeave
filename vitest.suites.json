@@ -928,6 +928,7 @@
         "loopbackController.test.ts",
         "migrationReconciliation.test.ts",
         "operatorAuth.test.ts",
+        "operatorAuthCache.test.ts",
         "operatorHttp.test.ts",
         "operatorSessionProvisioning.test.ts",
         "operatorManagementAuthorization.test.ts",
