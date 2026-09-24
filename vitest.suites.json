@@ -1004,6 +1004,7 @@
         "serverDataCompose.test.ts",
         "serverServe.test.ts",
         "setupCodeFlow.test.ts",
+        "setupCodeIssuerAuthorization.test.ts",
         "tailscaleProxyTransport.test.ts",
         "tailscaleWebSocketReadiness.test.ts",
         "transportAdmission.test.ts",

@@ -48,6 +48,7 @@ import { evaluateDeviceUsability } from "./schemas.js";
 import { MembershipStore } from "./membershipStore.js";
 import { HumanIdentityCredentialStore } from "./humanIdentityCredentialStore.js";
 import { HUMAN_IDENTITY_DEFAULT_TTL_MS } from "./limits.js";
+import type { OperatorSession } from "@planweave-ai/collaboration-protocol/identity/workspace";
 
 const DEFAULT_DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_OPERATOR_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -82,6 +83,9 @@ export class SetupCodeError extends Error {
 
 export type SetupCodeServiceOptions = {
   database: SqliteDatabase;
+  issuerAuthorization: {
+    isAuthorizedSetupCodeIssuer(session: OperatorSession, targetWorkspaceId: string): boolean;
+  };
   serverBaseUrl: string;
   allowInsecureTransport?: boolean;
   clock?: () => Date;
@@ -110,9 +114,11 @@ export class SetupCodeService {
   private readonly hostCredentialTtlMs: number;
   private readonly identityCredentials: HumanIdentityCredentialStore;
   private readonly onWorkspaceDeviceMembershipCreated: SetupCodeServiceOptions["onWorkspaceDeviceMembershipCreated"];
+  private readonly issuerAuthorization: SetupCodeServiceOptions["issuerAuthorization"];
 
   constructor(options: SetupCodeServiceOptions) {
     this.database = options.database;
+    this.issuerAuthorization = options.issuerAuthorization;
     this.clock = options.clock ?? (() => new Date());
     this.store = new SetupCodeStore(options.database, this.clock);
     this.workspaceIdentity = new WorkspaceIdentityRepository(options.database);
@@ -135,6 +141,13 @@ export class SetupCodeService {
   issue(principal: OperatorPrincipal, rawRequest: unknown): SetupCodeIssueResponse {
     const request = setupCodeIssueRequestSchema.parse(rawRequest);
     this.authorizeWorkspace(principal, request.workspaceId);
+    this.assertIssuerUsable(
+      {
+        operatorId: principal.operatorId,
+        operatorSessionId: principal.operatorSessionId
+      },
+      request.workspaceId
+    );
     const workspaceId = workspaceIdSchema.parse(request.workspaceId);
     this.assertWorkspaceUsable(workspaceId);
     const now = this.clock();
@@ -234,6 +247,9 @@ export class SetupCodeService {
   ): SetupCodeRedeemResponse {
     const found = this.store.findByToken(request.setupCode);
     if (!found) throw new SetupCodeError("setup_code_invalid");
+    if (found.issuerSource.kind === "incomplete") {
+      throw new SetupCodeError("setup_code_issuer_revoked");
+    }
     try {
       assertSetupRedeemPurposeMatch(found, request);
     } catch {
@@ -244,7 +260,9 @@ export class SetupCodeService {
       if (outcome) return this.resumeHostEnrollment(found, request, outcome);
     }
     this.assertWorkspaceUsable(found.workspaceId);
-    this.assertIssuerUsable(found);
+    if (found.issuerSource.kind === "issued") {
+      this.assertIssuerUsable(found.issuerSource.issuer, found.workspaceId);
+    }
     const usability = evaluateSetupCodeUsability({
       grant: found,
       workspaceId: found.workspaceId,
@@ -585,15 +603,20 @@ export class SetupCodeService {
     }
   }
 
-  private assertIssuerUsable(grant: NonNullable<ReturnType<SetupCodeStore["findByToken"]>>): void {
-    if (!grant.issuer) return;
+  private assertIssuerUsable(
+    issuer: { operatorId: string; operatorSessionId: string },
+    workspaceId: string
+  ): void {
     const session =
-      this.operators.findBySessionId(grant.workspaceId, grant.issuer.operatorSessionId) ??
-      this.operators.findBySessionIdAcrossWorkspaces(grant.issuer.operatorSessionId);
+      this.operators.findBySessionId(workspaceId, issuer.operatorSessionId) ??
+      this.operators.findBySessionIdAcrossWorkspaces(issuer.operatorSessionId);
     if (!session || session.revokedAt !== null) {
       throw new SetupCodeError("setup_code_issuer_revoked");
     }
-    if (session.operatorId !== grant.issuer.operatorId) {
+    if (
+      session.operatorId !== issuer.operatorId ||
+      !this.issuerAuthorization.isAuthorizedSetupCodeIssuer(session, workspaceId)
+    ) {
       throw new SetupCodeError("setup_code_issuer_revoked");
     }
   }

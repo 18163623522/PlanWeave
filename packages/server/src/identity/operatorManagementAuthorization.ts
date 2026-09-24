@@ -7,6 +7,7 @@ import {
   type ManagementAuthorizationStatus
 } from "@planweave-ai/agent-host-protocol/operator-control";
 import type { OperatorCredential, OperatorPrincipal } from "../operatorAuth.js";
+import type { OperatorSession } from "@planweave-ai/collaboration-protocol/identity/workspace";
 import { inWriteTransaction, type SqliteDatabase } from "../sqlite.js";
 import { OperatorSessionStore, hashOperatorSessionToken } from "./operatorSessionStore.js";
 
@@ -45,6 +46,23 @@ export class OperatorManagementAuthorization {
     );
     const root = authority && this.sessions.findByCredentialDigest(authority.tokenSha256);
     return root && root.revokedAt === row.authority_revoked_at ? authority : undefined;
+  }
+
+  isAuthorizedSetupCodeIssuer(session: OperatorSession, targetWorkspaceId: string): boolean {
+    const delegation = this.database
+      .prepare("SELECT 1 FROM operator_management_sessions WHERE credential_sha256=?")
+      .get(session.credentialSha256);
+    if (delegation) {
+      const authority = this.delegatedCredential(session.credentialSha256);
+      return authority?.operatorId === session.operatorId;
+    }
+    if (session.workspaceId === targetWorkspaceId) return true;
+    return this.credentials.some(
+      (credential) =>
+        credential.serverAdmin &&
+        credential.operatorId === session.operatorId &&
+        credential.tokenSha256 === session.credentialSha256
+    );
   }
 
   maintain(principal: OperatorPrincipal): ManagementAuthorizationStatus {

@@ -16,7 +16,11 @@ import {
 import { WorkspaceIdentityRepository } from "../identity/workspaceRepository.js";
 import { HumanIdentityCredentialStore } from "../identity/humanIdentityCredentialStore.js";
 import { applyMigrations } from "../migrations.js";
-import { hashOperatorToken, OperatorTokenRegistry } from "../operatorAuth.js";
+import {
+  hashOperatorToken,
+  OperatorTokenRegistry,
+  type OperatorCredential
+} from "../operatorAuth.js";
 import { provisionConfiguredOperatorSessions } from "../identity/operatorSessionProvisioning.js";
 import { OperatorSessionStore } from "../identity/operatorSessionStore.js";
 import { openServerDatabase, type SqliteDatabase } from "../sqlite.js";
@@ -79,9 +83,20 @@ function principal(database: SqliteDatabase) {
   return principal;
 }
 
-function service(database: SqliteDatabase) {
+function service(
+  database: SqliteDatabase,
+  credentials: OperatorCredential[] = [
+    {
+      operatorId: "operator-admin",
+      tokenSha256: hashOperatorToken(adminToken),
+      projectIds: ["project-setup"],
+      serverAdmin: false
+    }
+  ]
+) {
   return new SetupCodeService({
     database,
+    issuerAuthorization: new OperatorTokenRegistry(database, credentials).management,
     serverBaseUrl: "http://127.0.0.1:7443/",
     allowInsecureTransport: true
   });
@@ -168,7 +183,14 @@ describe("setup code issue/redeem/revoke", () => {
         new WorkspaceIdentityRepository(database).workspaceForLegacyProject(id),
       operatorSessionTtlMs: 30 * 24 * 60 * 60 * 1_000
     });
-    const setup = service(database);
+    const setup = service(database, [
+      {
+        operatorId: "operator-admin",
+        tokenSha256: hashOperatorToken(adminToken),
+        projectIds: [],
+        serverAdmin: true
+      }
+    ]);
     const admin = new OperatorTokenRegistry(database, [
       {
         operatorId: "operator-admin",
@@ -245,7 +267,14 @@ describe("setup code issue/redeem/revoke", () => {
         new WorkspaceIdentityRepository(database).workspaceForLegacyProject(id),
       operatorSessionTtlMs: 30 * 24 * 60 * 60 * 1_000
     });
-    const setup = service(database);
+    const setup = service(database, [
+      {
+        operatorId: "operator-admin",
+        tokenSha256: hashOperatorToken(adminToken),
+        projectIds: [],
+        serverAdmin: true
+      }
+    ]);
     const admin = new OperatorTokenRegistry(database, [
       {
         operatorId: "operator-admin",
@@ -323,6 +352,14 @@ describe("setup code issue/redeem/revoke", () => {
     let now = new Date("2030-01-01T00:00:00.000Z");
     const setup = new SetupCodeService({
       database,
+      issuerAuthorization: new OperatorTokenRegistry(database, [
+        {
+          operatorId: "operator-admin",
+          tokenSha256: hashOperatorToken(adminToken),
+          projectIds: [],
+          serverAdmin: true
+        }
+      ]).management,
       serverBaseUrl: "http://127.0.0.1:7443/",
       allowInsecureTransport: true,
       clock: () => now,
@@ -571,6 +608,14 @@ describe("setup code issue/redeem/revoke", () => {
     let nowMs = Date.now();
     const timed = new SetupCodeService({
       database,
+      issuerAuthorization: new OperatorTokenRegistry(database, [
+        {
+          operatorId: "operator-admin",
+          tokenSha256: hashOperatorToken(adminToken),
+          projectIds: ["project-setup"],
+          serverAdmin: false
+        }
+      ]).management,
       serverBaseUrl: "http://127.0.0.1:7443/",
       allowInsecureTransport: true,
       clock: () => new Date(nowMs)
@@ -900,7 +945,14 @@ describe("setup code issue/redeem/revoke", () => {
         new WorkspaceIdentityRepository(database).workspaceForLegacyProject(id),
       operatorSessionTtlMs: 30 * 24 * 60 * 60 * 1_000
     });
-    const setup = service(database);
+    const setup = service(database, [
+      {
+        operatorId: "operator-admin",
+        tokenSha256: hashOperatorToken(adminToken),
+        projectIds: [],
+        serverAdmin: true
+      }
+    ]);
     const admin = new OperatorTokenRegistry(database, [
       {
         operatorId: "operator-admin",

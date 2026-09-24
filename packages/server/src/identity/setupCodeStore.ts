@@ -105,6 +105,11 @@ export type SetupCodeIssuer = {
   operatorSessionId: string;
 };
 
+type SetupCodeIssuerSource =
+  | { kind: "bootstrap" }
+  | { kind: "incomplete" }
+  | { kind: "issued"; issuer: SetupCodeIssuer };
+
 export class SetupCodeStore {
   constructor(
     private readonly database: SqliteDatabase,
@@ -161,7 +166,7 @@ export class SetupCodeStore {
   findByToken(
     setupCode: string
   ):
-    | (SetupCodeGrant & { issuer?: SetupCodeIssuer; credentialExpiresAt: string | null })
+    | (SetupCodeGrant & { issuerSource: SetupCodeIssuerSource; credentialExpiresAt: string | null })
     | undefined {
     let digest: string;
     try {
@@ -179,7 +184,7 @@ export class SetupCodeStore {
   getById(
     setupCodeId: string
   ):
-    | (SetupCodeGrant & { issuer?: SetupCodeIssuer; credentialExpiresAt: string | null })
+    | (SetupCodeGrant & { issuerSource: SetupCodeIssuerSource; credentialExpiresAt: string | null })
     | undefined {
     const id = setupCodeIdSchema.parse(setupCodeId);
     const row = this.database
@@ -292,20 +297,28 @@ export class SetupCodeStore {
   }
 
   private enrich(row: SetupCodeGrantRow): SetupCodeGrant & {
-    issuer?: SetupCodeIssuer;
+    issuerSource: SetupCodeIssuerSource;
     credentialExpiresAt: string | null;
   } {
     const grant = toGrant(row);
+    let issuerSource: SetupCodeIssuerSource;
+    if (row.issued_by_operator_id === null && row.issued_by_operator_session_id === null) {
+      issuerSource = { kind: "bootstrap" };
+    } else if (row.issued_by_operator_id === null || row.issued_by_operator_session_id === null) {
+      issuerSource = { kind: "incomplete" };
+    } else {
+      issuerSource = {
+        kind: "issued",
+        issuer: {
+          operatorId: row.issued_by_operator_id,
+          operatorSessionId: row.issued_by_operator_session_id
+        }
+      };
+    }
     return {
       ...grant,
       credentialExpiresAt: row.credential_expires_at,
-      issuer:
-        row.issued_by_operator_id && row.issued_by_operator_session_id
-          ? {
-              operatorId: row.issued_by_operator_id,
-              operatorSessionId: row.issued_by_operator_session_id
-            }
-          : undefined
+      issuerSource
     };
   }
 }

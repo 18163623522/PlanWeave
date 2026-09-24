@@ -203,8 +203,15 @@ export function createIdentityServices(input: {
   activity: ActivityJournalComposition;
   onHumanIdentityCreated(identity: HumanIdentityRepository): void;
 }) {
+  const authorization = new OperatorTokenRegistry(
+    input.database,
+    input.config.operatorCredentials,
+    input.clock,
+    input.config.operatorSessionTtlMs
+  );
   const setupCodes = new SetupCodeService({
     database: input.database,
+    issuerAuthorization: authorization.management,
     serverBaseUrl: input.config.transport.advertisedOrigin.endsWith("/")
       ? input.config.transport.advertisedOrigin
       : `${input.config.transport.advertisedOrigin}/`,
@@ -226,12 +233,6 @@ export function createIdentityServices(input: {
       }
     }
   });
-  const authorization = new OperatorTokenRegistry(
-    input.database,
-    input.config.operatorCredentials,
-    input.clock,
-    input.config.operatorSessionTtlMs
-  );
   const serverAdminAnchorWorkspaceId =
     input.runtimeRegistry.expansions[0]?.workspaceId ??
     input.ownerRuntimeRegistry.expansions[0]?.workspaceId ??
