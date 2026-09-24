@@ -1,4 +1,7 @@
 import { app, BrowserWindow } from "electron";
+import { runManagementAuthorizationSmoke } from "./__tests__/smoke/smokeManagementAuthorization.js";
+import { runManagementServerSwitchSmoke } from "./__tests__/smoke/smokeManagementServerSwitch.js";
+import { runRemoteAgentCatalogSmoke } from "./__tests__/smoke/smokeRemoteAgentCatalog.js";
 import { realpath, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import {
@@ -1419,7 +1422,47 @@ export async function runSmokeCheck(window: BrowserWindow): Promise<void> {
         const collaborationAccessibility = liveCollaboration
           ? await runCollaborationAccessibilitySmoke(window, liveCollaboration)
           : null;
-        workflow = { ...workflow, liveCollaboration, collaborationAccessibility };
+        const managementAuthorization = liveCollaboration
+          ? await runManagementAuthorizationSmoke(window)
+          : null;
+        if (managementAuthorization)
+          console.log(
+            JSON.stringify({
+              event: "PLANWEAVE_DESKTOP_SMOKE_STAGE",
+              stage: "management-complete",
+              result: managementAuthorization
+            })
+          );
+        const managementServerSwitch = managementAuthorization
+          ? await runManagementServerSwitchSmoke(window)
+          : null;
+        if (managementServerSwitch)
+          console.log(
+            JSON.stringify({
+              event: "PLANWEAVE_DESKTOP_SMOKE_STAGE",
+              stage: "server-switch-complete",
+              result: managementServerSwitch
+            })
+          );
+        const remoteAgentCatalog = managementServerSwitch
+          ? await runRemoteAgentCatalogSmoke(window)
+          : null;
+        if (remoteAgentCatalog)
+          console.log(
+            JSON.stringify({
+              event: "PLANWEAVE_DESKTOP_SMOKE_STAGE",
+              stage: "remote-catalog-complete",
+              result: remoteAgentCatalog
+            })
+          );
+        workflow = {
+          ...workflow,
+          liveCollaboration,
+          managementAuthorization,
+          managementServerSwitch,
+          remoteAgentCatalog,
+          collaborationAccessibility
+        };
       } catch (error) {
         console.error(
           JSON.stringify({

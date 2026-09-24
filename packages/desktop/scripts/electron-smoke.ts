@@ -66,6 +66,12 @@ const collaborationFixture = localCollaborationOnly
       projectRoot: smokeProjectRoot,
       projectId: init.workspace.id
     });
+const switchedServerFixture = localCollaborationOnly
+  ? null
+  : await startCollaborationSmokeFixture({
+      projectRoot: smokeProjectRoot,
+      projectId: init.workspace.id
+    });
 
 let output = "";
 const appendOutput = (text: string, stream: "stdout" | "stderr") => {
@@ -103,7 +109,11 @@ try {
           }
         : {
             PLANWEAVE_DESKTOP_SMOKE_COLLABORATION_SERVER_URL: collaborationFixture.origin,
-            PLANWEAVE_DESKTOP_SMOKE_COLLABORATION_PROJECT_ID: collaborationFixture.projectId
+            PLANWEAVE_DESKTOP_SMOKE_COLLABORATION_PROJECT_ID: collaborationFixture.projectId,
+            PLANWEAVE_DESKTOP_SMOKE_OPERATOR_TOKEN: collaborationFixture.operatorToken,
+            PLANWEAVE_DESKTOP_SMOKE_SWITCHED_SERVER_URL: switchedServerFixture.origin,
+            PLANWEAVE_DESKTOP_SMOKE_CONTROL_URL: collaborationFixture.controlOrigin,
+            PLANWEAVE_DESKTOP_SMOKE_CONTROL_KEY: collaborationFixture.controlKey
           })
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -119,17 +129,19 @@ try {
   });
 
   await assertSmokeProcess(child, () => output, {
-    timeoutMs: 30_000,
+    timeoutMs: 90_000,
     terminationGraceMs: 2_000
   });
+  if (output.includes("pw_operator_")) {
+    throw new Error("Desktop smoke output leaked an operator token.");
+  }
   if (
     localCollaborationOnly &&
-    (output.includes(smokeProjectRoot) ||
-      output.includes("projectRoot") ||
-      output.includes("pw_operator_"))
+    (output.includes(smokeProjectRoot) || output.includes("projectRoot"))
   ) {
-    throw new Error("Local collaboration smoke output leaked a project root or operator token.");
+    throw new Error("Local collaboration smoke output leaked a project root.");
   }
 } finally {
   await collaborationFixture?.close();
+  await switchedServerFixture?.close();
 }

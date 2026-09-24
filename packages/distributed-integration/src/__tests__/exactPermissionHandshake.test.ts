@@ -65,7 +65,11 @@ describe("exact permission connection compatibility", () => {
         new Promise((resolve) => {
           signal.addEventListener(
             "abort",
-            () => resolve({ state: "cancelled", message: "cancelled" }),
+            () =>
+              resolve({
+                terminal: { state: "cancelled", message: "cancelled" },
+                cleanup: { attempted: true, completed: true }
+              }),
             { once: true }
           );
         })
