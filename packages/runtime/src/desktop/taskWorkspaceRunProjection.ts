@@ -53,6 +53,7 @@ const taskWorkspaceProjectionRecordSchema = z
 
 const taskWorkspaceProjectionMetadataSchema = z
   .object({
+    submittedAt: z.string().datetime().optional(),
     executionWaveId: executionWaveIdSchema.optional(),
     runnerKind: runnerTransportSchema.nullable().optional(),
     agentId: agentFamilySchema.nullable().optional()
@@ -254,6 +255,7 @@ export function projectTaskWorkspaceRun(options: {
       agentSessionId: record.agentSessionId,
       tmuxSessionId: record.tmuxSessionId ?? null,
       exitCode: record.exitCode,
+      submittedAt: metadata.submittedAt ?? null,
       terminalState: terminalState?.kind === "terminal" ? terminalState.outcome.state : null
     },
     executionWaveId: metadata.executionWaveId ?? null,

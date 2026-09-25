@@ -89,7 +89,10 @@ export type TaskWorkspaceLabels = {
   resizeInspector: string;
   resizeTimeline: string;
   reviewVerdict: Record<"needs_changes" | "passed", string>;
-  runStatus: Record<"active" | "cancelled" | "completed" | "failed" | "waiting", string>;
+  runStatus: Record<
+    "active" | "cancelled" | "completed" | "failed" | "waiting" | "submitted",
+    string
+  >;
   status: string;
   taskExecutor: string;
   taskStatus: Record<TaskWorkspace["task"]["status"], string>;

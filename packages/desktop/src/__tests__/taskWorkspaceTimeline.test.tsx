@@ -25,6 +25,7 @@ const labels: TaskWorkspaceTimelineLabels = {
     review_attempt: "Review attempt"
   },
   completed: "Completed",
+  submitted: "Report submitted",
   dependencies: "Dependencies",
   dependencyProgress: (completed, total, percent) => `${completed}/${total} (${percent}%)`,
   elapsed: "Elapsed",

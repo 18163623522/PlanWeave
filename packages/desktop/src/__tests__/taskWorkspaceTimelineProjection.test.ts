@@ -13,6 +13,18 @@ import {
 } from "./helpers/taskWorkspaceTimelineFixture";
 
 describe("Task Workspace timeline projection", () => {
+  it("shows report submissions as submitted without fabricated completion timing", () => {
+    const item = timelineRunFixture("T-001#B-001", "RUN-001");
+    item.active = false;
+    item.run.metadata.runnerKind = null;
+    item.run.metadata.submittedAt = "2026-09-24T02:55:41.761Z";
+    item.run.duration.finishedAt = null;
+    const projection = projectTaskWorkspaceTimeline(
+      timelineWorkspaceFixture([timelineBlockFixture({ blockId: "B-001", runs: [item] })])
+    );
+    expect(projection.runs[0]?.status).toBe("submitted");
+  });
+
   it("preserves graph block order and stabilizes retries by retry index then record id", () => {
     const secondRef = "T-001#B-002";
     const firstBlock = timelineBlockFixture({

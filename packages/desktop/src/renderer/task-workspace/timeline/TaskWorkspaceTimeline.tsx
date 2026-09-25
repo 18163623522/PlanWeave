@@ -17,6 +17,7 @@ import { useTimelineWindow } from "./useTimelineWindow";
 const statusClasses: Record<TimelineRunStatus, string> = {
   active: "border-primary/50 bg-primary/10 text-primary",
   cancelled: "border-border bg-surface-muted text-text-muted",
+  submitted: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   completed: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   failed: "border-destructive/40 bg-destructive/10 text-destructive",
   waiting: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
@@ -27,6 +28,7 @@ function statusLabel(status: TimelineRunStatus, labels: TaskWorkspaceTimelineLab
     active: labels.running,
     cancelled: labels.cancelled,
     completed: labels.completed,
+    submitted: labels.submitted,
     failed: labels.failed,
     waiting: labels.waiting
   };

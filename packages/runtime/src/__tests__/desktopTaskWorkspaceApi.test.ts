@@ -436,6 +436,33 @@ describe("desktop Task Workspace aggregate API", () => {
     expect(mixed.selectedRecordId).toBe("T-001#B-001::RUN-3");
   });
 
+  it("projects a submitted report without inventing runner timing or transport", async () => {
+    const { root } = await createTestWorkspace();
+    await claimNext({ projectRoot: root });
+    await submitBlockResult({
+      projectRoot: root,
+      ref: "T-001#B-001",
+      reportPath: await writeReport(root, "implementation.md")
+    });
+    const workspace = await loadComposedTaskWorkspace({
+      projectRoot: root,
+      canvasId: "default",
+      taskId: "T-001"
+    });
+    const item = workspace.blocks[0]!.runs[0]!;
+    expect(item.active).toBe(false);
+    expect(item.run.metadata).toMatchObject({
+      submittedAt: expect.any(String),
+      runnerKind: null,
+      terminalState: null
+    });
+    expect(item.run.duration).toMatchObject({
+      startedAt: null,
+      finishedAt: null,
+      wallClockMs: null
+    });
+  });
+
   it("groups each feedback run with its source review attempt without duplicate feedback rows", async () => {
     const { root, init } = await createTestWorkspace();
     await claimNext({ projectRoot: root });

@@ -142,6 +142,7 @@ function operationRunItem(options: {
         agentSessionId: null,
         tmuxSessionId: null,
         exitCode: terminalState === "succeeded" ? 0 : terminalState ? 1 : null,
+        submittedAt: null,
         terminalState
       },
       executionWaveId: null,

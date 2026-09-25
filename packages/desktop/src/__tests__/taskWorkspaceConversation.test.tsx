@@ -28,6 +28,24 @@ afterEach(cleanupRendererTestEnvironment);
 const t = createTranslator("en");
 
 describe("Task Workspace conversation", () => {
+  it("shows submitted report content without requiring an automatic runner transport", () => {
+    const selected = selection({ active: false, model: null });
+    selected.item.run.metadata.runnerKind = null;
+    selected.item.run.metadata.submittedAt = timestamp;
+    const props = conversationProps(selected, null);
+    props.selectedRecord = {
+      ...record(null),
+      metadata: { submittedAt: timestamp },
+      reportMarkdown: "# Submitted implementation report",
+      reportPath: "/report.md"
+    };
+    render(<TaskWorkspaceConversation {...props} api={null} t={t} />);
+    expect(
+      screen.getByRole("heading", { name: "Submitted implementation report" })
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("taskWorkspaceUnsupportedTransport"))).not.toBeInTheDocument();
+  });
+
   it("does not label a completed remote attempt as still occupying the composer", () => {
     render(
       <TaskWorkspaceComposer

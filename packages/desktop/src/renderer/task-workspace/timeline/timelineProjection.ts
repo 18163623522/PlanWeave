@@ -48,6 +48,7 @@ export function taskWorkspaceRunStatus(item: RunItem): TimelineRunStatus {
   if (item.run.duration.finishedAt !== null) {
     return "completed";
   }
+  if (item.run.metadata.submittedAt !== null) return "submitted";
   return "waiting";
 }
 

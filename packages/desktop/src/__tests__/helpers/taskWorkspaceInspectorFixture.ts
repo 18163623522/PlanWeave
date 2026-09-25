@@ -95,6 +95,7 @@ export function taskWorkspaceInspectorFixture(
       agentSessionId: "session-1",
       tmuxSessionId: null,
       exitCode: 0,
+      submittedAt: null,
       terminalState: "succeeded"
     },
     executionWaveId: null,

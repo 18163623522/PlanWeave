@@ -162,6 +162,7 @@ export function taskWorkspaceLabels(t: Translator): TaskWorkspaceLabels {
       active: t("taskWorkspaceRunning"),
       cancelled: t("taskWorkspaceCancelled"),
       completed: t("taskWorkspaceCompleted"),
+      submitted: t("taskWorkspaceReportSubmitted"),
       failed: t("taskWorkspaceFailed"),
       waiting: t("taskWorkspaceWaiting")
     },
@@ -195,6 +196,7 @@ export function taskWorkspaceTimelineLabels(t: Translator): TaskWorkspaceTimelin
     },
     cancelled: t("taskWorkspaceCancelled"),
     completed: t("taskWorkspaceCompleted"),
+    submitted: t("taskWorkspaceReportSubmitted"),
     dependencies: t("dependencies"),
     dependencyProgress: (completed, total, percent) =>
       interpolate(t("taskWorkspaceDependencyProgress"), { completed, percent, total }),
@@ -304,6 +306,7 @@ export function taskWorkspaceInspectorLabels(t: Translator): TaskWorkspaceInspec
     runStatus: {
       cancelled: t("taskWorkspaceCancelled"),
       completed: t("taskWorkspaceCompleted"),
+      submitted: t("taskWorkspaceReportSubmitted"),
       failed: t("taskWorkspaceFailed"),
       recorded: t("taskWorkspaceRecorded"),
       running: t("taskWorkspaceRunning")

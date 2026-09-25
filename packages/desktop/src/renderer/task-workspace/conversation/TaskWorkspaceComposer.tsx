@@ -94,6 +94,9 @@ export function TaskWorkspaceComposer({
     </>
   );
   const runnerKind = selectedRun.item.run.metadata.runnerKind;
+  if (runnerKind === null && selectedRun.item.run.metadata.submittedAt !== null) {
+    return <ComposerUnavailable accessory={accessory} reason={t("taskWorkspaceReportOnly")} />;
+  }
   if (runnerKind === "cli") {
     return (
       <ComposerUnavailable

@@ -1226,6 +1226,8 @@ export const enCatalog = {
   taskWorkspaceRecordUnavailable: "The selected run record is unavailable.",
   taskWorkspaceRecordMismatch:
     "The selected run record does not match the current Task Workspace selection.",
+  taskWorkspaceReportSubmitted: "Report submitted",
+  taskWorkspaceReportOnly: "This record contains a submitted report; no conversation was recorded.",
   taskWorkspaceUnsupportedTransport:
     "The selected run does not declare a supported conversation transport.",
   taskWorkspaceAcpLoadFailed: "The selected ACP conversation could not be loaded.",

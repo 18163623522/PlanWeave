@@ -892,6 +892,7 @@ describe("Task Workspace bounded query contract", () => {
             agentSessionId: null,
             tmuxSessionId: null,
             exitCode: null,
+            submittedAt: null,
             terminalState: null
           },
           executionWaveId: null,

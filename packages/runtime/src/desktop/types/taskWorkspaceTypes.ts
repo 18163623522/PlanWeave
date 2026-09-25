@@ -277,6 +277,7 @@ export const taskWorkspaceRunMetadataSchema = z
     agentSessionId: nullableNonEmptyStringSchema,
     tmuxSessionId: nullableNonEmptyStringSchema,
     exitCode: z.number().int().nullable(),
+    submittedAt: z.string().datetime().nullable(),
     terminalState: runnerTerminalStateSchema.nullable()
   })
   .strict();

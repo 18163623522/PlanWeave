@@ -149,6 +149,7 @@ export function selection(
       agentSessionId: runnerKind === "acp" ? "ACP-SESSION-001" : null,
       tmuxSessionId: null,
       exitCode: null,
+      submittedAt: null,
       terminalState: options.retry || options.recovery ? "failed" : null
     },
     executionWaveId: null,

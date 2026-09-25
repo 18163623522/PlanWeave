@@ -5,7 +5,13 @@ import type {
 } from "@planweave-ai/runtime";
 import type { TaskWorkspaceTimelineSlotProps } from "../contracts";
 
-export type TimelineRunStatus = "active" | "waiting" | "failed" | "cancelled" | "completed";
+export type TimelineRunStatus =
+  | "active"
+  | "waiting"
+  | "failed"
+  | "cancelled"
+  | "completed"
+  | "submitted";
 
 export interface TimelineWaveMembership {
   index: number;
@@ -58,6 +64,7 @@ export interface TaskWorkspaceTimelineLabels {
   annotationKinds: Record<TaskWorkspaceAnnotation["kind"], string>;
   feedbackStatus: Record<"dismissed" | "in_progress" | "open" | "resolved", string>;
   completed: string;
+  submitted: string;
   cancelled: string;
   dependencies: string;
   dependencyProgress: (completed: number, total: number, percent: number) => string;

@@ -66,6 +66,7 @@ export type TaskWorkspaceInspectorLabels = {
     failed: string;
     recorded: string;
     running: string;
+    submitted: string;
   };
   sequence: (sequence: number) => string;
   session: string;
@@ -203,6 +204,8 @@ function runStatus(
       return labels.runStatus.running;
     case "cancelled":
       return labels.runStatus.cancelled;
+    case "submitted":
+      return labels.runStatus.submitted;
     case "completed":
       return labels.runStatus.completed;
     case "failed":

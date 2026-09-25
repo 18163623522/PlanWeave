@@ -60,6 +60,7 @@ export function timelineRunFixture(
       agentSessionId: `session-${runId}`,
       tmuxSessionId: null,
       exitCode: options.exitCode ?? null,
+      submittedAt: null,
       terminalState: options.terminalState ?? null
     },
     executionWaveId: options.executionWaveId ?? null,

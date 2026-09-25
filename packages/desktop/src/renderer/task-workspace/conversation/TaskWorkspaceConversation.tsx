@@ -1,3 +1,4 @@
+import { TaskWorkspaceSubmittedReport } from "./TaskWorkspaceSubmittedReport";
 import { RemoteAcpRunConversation } from "./RemoteAcpRunConversation";
 import type {
   ArtifactReference,
@@ -88,6 +89,15 @@ export function TaskWorkspaceConversation(
     );
   }
   const runnerKind = selectedRun.item.run.metadata.runnerKind;
+  if (runnerKind === null && selectedRun.item.run.metadata.submittedAt !== null) {
+    return (
+      <TaskWorkspaceSubmittedReport
+        record={selectedRecord}
+        submittedAt={selectedRun.item.run.metadata.submittedAt}
+        t={t}
+      />
+    );
+  }
   if (runnerKind === "cli") {
     return <TaskWorkspaceCliRun api={api} canvasRef={canvasRef} record={selectedRecord} t={t} />;
   }

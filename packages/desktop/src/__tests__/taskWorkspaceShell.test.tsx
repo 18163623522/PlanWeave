@@ -115,6 +115,7 @@ const labels: TaskWorkspaceLabels = {
     active: "Running",
     cancelled: "Cancelled",
     completed: "Completed",
+    submitted: "Report submitted",
     failed: "Failed",
     waiting: "Waiting"
   },

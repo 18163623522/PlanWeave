@@ -81,6 +81,7 @@ function projectedRun(runId: string, active: boolean): TaskWorkspaceRun {
       agentSessionId: `session-${runId}`,
       tmuxSessionId: null,
       exitCode: active ? null : 0,
+      submittedAt: null,
       terminalState: active ? null : "succeeded"
     },
     executionWaveId: null,

@@ -1140,6 +1140,8 @@ export const zhCnCatalog = {
   taskWorkspaceLoadingSelectedRun: "正在加载所选运行…",
   taskWorkspaceRecordUnavailable: "所选运行记录不可用。",
   taskWorkspaceRecordMismatch: "所选运行记录与当前 Task Workspace 选择不一致。",
+  taskWorkspaceReportSubmitted: "已提交报告",
+  taskWorkspaceReportOnly: "此记录包含已提交的报告，未记录对话。",
   taskWorkspaceUnsupportedTransport: "所选运行未声明受支持的对话传输方式。",
   taskWorkspaceAcpLoadFailed: "无法加载所选 ACP 对话。",
   taskWorkspaceAcpLoading: "正在加载所选 ACP 对话…",

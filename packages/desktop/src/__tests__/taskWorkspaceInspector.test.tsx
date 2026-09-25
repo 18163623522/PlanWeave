@@ -88,6 +88,7 @@ const labels: TaskWorkspaceInspectorLabels = {
   runStatus: {
     cancelled: "Cancelled",
     completed: "Completed",
+    submitted: "Report submitted",
     failed: "Failed",
     recorded: "Recorded",
     running: "Running"
