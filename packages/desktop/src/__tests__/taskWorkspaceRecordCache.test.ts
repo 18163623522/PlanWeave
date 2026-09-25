@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { TaskWorkspaceRunDetail } from "@planweave-ai/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -70,6 +70,7 @@ describe("TaskWorkspaceRecordCache", () => {
         api,
         authorityKey: "authority-a",
         enabled: true,
+        freshnessKey: "",
         identity: selectionIdentity,
         onRecordReady,
         syntheticLoad: null
@@ -203,6 +204,93 @@ describe("TaskWorkspaceRecordCache", () => {
       "new authority"
     );
     expect(cache.getRecord("authority-a", "T-001#B-001", recordId)).toBeNull();
+  });
+
+  it("keeps a newer detail when an older freshness read resolves last", async () => {
+    const cache = new TaskWorkspaceRecordCache();
+    const recordId = "T-001#B-001::RUN-001";
+    cache.setAuthority("authority-a");
+    const oldRead = deferred<TaskWorkspaceRunDetail>();
+    cache.setScrollTop("authority-a", "T-001#B-001", recordId, 128);
+    const oldRequest = cache.loadRecord(identity(recordId), () => oldRead.promise, "running");
+    const newRead = vi.fn(async () => detail(recordId, "terminal report"));
+
+    expect(cache.getRecord("authority-a", "T-001#B-001", recordId, "terminal")).toBeNull();
+    const newRequest = cache.loadRecord(identity(recordId), newRead, "terminal");
+    await expect(newRequest).resolves.toMatchObject({
+      record: { stdoutSummary: "terminal report" }
+    });
+    oldRead.resolve(detail(recordId, "old empty report"));
+    await oldRequest;
+
+    expect(
+      cache.getRecord("authority-a", "T-001#B-001", recordId, "terminal")?.record?.stdoutSummary
+    ).toBe("terminal report");
+    await cache.loadRecord(identity(recordId), newRead, "terminal");
+    expect(newRead).toHaveBeenCalledOnce();
+    expect(cache.getScrollTop("authority-a", "T-001#B-001", recordId)).toBe(128);
+  });
+
+  it("does not revive a pending detail after switching A to B and back to A", async () => {
+    const cache = new TaskWorkspaceRecordCache();
+    const recordId = "T-001#B-001::RUN-001";
+    cache.setAuthority("authority-a");
+    const oldRead = deferred<TaskWorkspaceRunDetail>();
+    const oldRequest = cache.loadRecord(identity(recordId), () => oldRead.promise);
+    cache.setAuthority("authority-b");
+    cache.setAuthority("authority-a");
+    const newRead = vi.fn(async () => detail(recordId, "latest A"));
+    await cache.loadRecord(identity(recordId), newRead);
+    oldRead.resolve(detail(recordId, "prior A"));
+    await oldRequest;
+
+    expect(cache.getRecord("authority-a", "T-001#B-001", recordId)?.record?.stdoutSummary).toBe(
+      "latest A"
+    );
+    expect(newRead).toHaveBeenCalledOnce();
+  });
+
+  it("does not publish an obsolete selected detail after its summary changes", async () => {
+    const recordId = "T-001#B-001::RUN-001";
+    const oldRead = deferred<TaskWorkspaceRunDetail>();
+    const onRecordReady = vi.fn();
+    const getTaskWorkspaceRunDetail = vi
+      .fn<() => Promise<TaskWorkspaceRunDetail>>()
+      .mockImplementationOnce(() => oldRead.promise)
+      .mockResolvedValueOnce(detail(recordId, "submitted report"));
+    const api = { getTaskWorkspaceRunDetail };
+    const selectionIdentity = identity(recordId);
+    const { result, rerender } = renderHook(
+      ({ freshnessKey }) =>
+        useTaskWorkspaceRecordCache({
+          api,
+          authorityKey: "authority-a",
+          enabled: true,
+          freshnessKey,
+          identity: selectionIdentity,
+          onRecordReady,
+          syntheticLoad: null
+        }),
+      { initialProps: { freshnessKey: "running" } }
+    );
+    await waitFor(() => expect(getTaskWorkspaceRunDetail).toHaveBeenCalledOnce());
+
+    rerender({ freshnessKey: "submitted" });
+    await waitFor(() =>
+      expect(result.current.recordLoad.record?.stdoutSummary).toBe("submitted report")
+    );
+    await act(async () => {
+      oldRead.resolve(detail(recordId, "old empty report"));
+      await oldRead.promise;
+    });
+
+    expect(result.current.recordLoad.record?.stdoutSummary).toBe("submitted report");
+    expect(onRecordReady).toHaveBeenCalledOnce();
+    expect(onRecordReady).toHaveBeenCalledWith(
+      expect.objectContaining({
+        record: expect.objectContaining({ stdoutSummary: "submitted report" })
+      })
+    );
   });
 
   it("isolates scroll positions by authority and applies scroll LRU promotion", () => {

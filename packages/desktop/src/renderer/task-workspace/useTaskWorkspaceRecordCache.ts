@@ -102,8 +102,8 @@ export class TaskWorkspaceRecordCache {
   readonly #scrollCapacity: number;
   #authorityKey = "";
   #generation = 0;
-  #records = new Map<string, TaskWorkspaceRecordLoad>();
-  #pending = new Map<string, Promise<TaskWorkspaceRecordLoad>>();
+  #records = new Map<string, { freshnessKey: string; load: TaskWorkspaceRecordLoad }>();
+  #pending = new Map<string, { freshnessKey: string; request: Promise<TaskWorkspaceRecordLoad> }>();
   #scrollPositions = new Map<string, number>();
 
   constructor(options: CacheOptions = {}) {
@@ -129,24 +129,37 @@ export class TaskWorkspaceRecordCache {
   getRecord(
     authorityKey: string,
     blockRef: string,
-    recordId: string
+    recordId: string,
+    freshnessKey = ""
   ): TaskWorkspaceRecordLoad | null {
     if (authorityKey !== this.#authorityKey) return null;
     const cacheKey = recordSelectionKey(authorityKey, blockRef, recordId);
     const cached = this.#records.get(cacheKey);
+    const pending = this.#pending.get(cacheKey);
+    if (pending && pending.freshnessKey !== freshnessKey) this.#pending.delete(cacheKey);
     if (!cached) return null;
+    if (cached.freshnessKey !== freshnessKey) {
+      this.#records.delete(cacheKey);
+      return null;
+    }
     touch(this.#records, cacheKey, cached);
-    return cached;
+    return cached.load;
   }
 
   loadRecord(
     identity: RecordIdentity,
-    readDetail: () => Promise<TaskWorkspaceRunDetail>
+    readDetail: () => Promise<TaskWorkspaceRunDetail>,
+    freshnessKey = ""
   ): Promise<TaskWorkspaceRecordLoad> {
     if (identity.authorityKey !== this.#authorityKey) {
       return Promise.reject(new Error("Task Workspace record authority is no longer active."));
     }
-    const cached = this.getRecord(identity.authorityKey, identity.blockRef, identity.recordId);
+    const cached = this.getRecord(
+      identity.authorityKey,
+      identity.blockRef,
+      identity.recordId,
+      freshnessKey
+    );
     if (cached) return Promise.resolve(cached);
     const cacheKey = recordSelectionKey(
       identity.authorityKey,
@@ -156,20 +169,25 @@ export class TaskWorkspaceRecordCache {
     // Pending reads stay outside the fulfilled-record LRU until they settle, so they remain
     // coalesced and cannot be evicted into duplicate, unarbitrated requests.
     const pending = this.#pending.get(cacheKey);
-    if (pending) return pending;
+    if (pending?.freshnessKey === freshnessKey) return pending.request;
+    if (pending) this.#pending.delete(cacheKey);
 
     const generation = this.#generation;
     const request = readDetail().then((detail) => {
       const loaded = validateDetail(identity, detail);
-      if (generation === this.#generation && identity.authorityKey === this.#authorityKey) {
-        touch(this.#records, cacheKey, loaded);
+      if (
+        generation === this.#generation &&
+        identity.authorityKey === this.#authorityKey &&
+        this.#pending.get(cacheKey)?.request === request
+      ) {
+        touch(this.#records, cacheKey, { freshnessKey, load: loaded });
         trimOldest(this.#records, this.#recordCapacity);
       }
       return loaded;
     });
-    this.#pending.set(cacheKey, request);
+    this.#pending.set(cacheKey, { freshnessKey, request });
     const clearPending = () => {
-      if (this.#pending.get(cacheKey) === request) {
+      if (this.#pending.get(cacheKey)?.request === request) {
         this.#pending.delete(cacheKey);
       }
     };
@@ -201,6 +219,7 @@ type UseTaskWorkspaceRecordCacheOptions = {
   api: Pick<DesktopBridgeApi, "getTaskWorkspaceRunDetail"> | null;
   authorityKey: string;
   enabled: boolean;
+  freshnessKey: string;
   identity: Omit<RecordIdentity, "authorityKey"> | null;
   onRecordReady: (load: TaskWorkspaceRecordLoad) => void;
   syntheticLoad: TaskWorkspaceRecordLoad | null;
@@ -214,17 +233,24 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
   const cacheRef = useRef<TaskWorkspaceRecordCache | null>(null);
   if (cacheRef.current === null) cacheRef.current = new TaskWorkspaceRecordCache();
   const cache = cacheRef.current;
-  const { api, authorityKey, enabled, identity, syntheticLoad } = options;
+  const { api, authorityKey, enabled, freshnessKey, identity, syntheticLoad } = options;
   cache.setAuthority(authorityKey);
   const selectionKey = identity
     ? recordSelectionKey(authorityKey, identity.blockRef, identity.recordId)
     : "";
-  const activeSelectionKey = useRef(selectionKey);
-  activeSelectionKey.current = selectionKey;
+  const activeSelectionKey = useRef(`${selectionKey}\u0000${freshnessKey}`);
+  activeSelectionKey.current = `${selectionKey}\u0000${freshnessKey}`;
   const selectionRequest = useRef(0);
   const onRecordReadyRef = useRef(options.onRecordReady);
   onRecordReadyRef.current = options.onRecordReady;
-  const [recordLoad, setRecordLoad] = useState(idleTaskWorkspaceRecordLoad);
+  const [recordLoadState, setRecordLoadState] = useState({
+    freshnessKey: "",
+    load: idleTaskWorkspaceRecordLoad
+  });
+  const setRecordLoad = useCallback(
+    (load: TaskWorkspaceRecordLoad) => setRecordLoadState({ freshnessKey, load }),
+    [freshnessKey]
+  );
 
   useEffect(() => {
     const request = ++selectionRequest.current;
@@ -247,7 +273,12 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
       });
       return;
     }
-    const cached = cache.getRecord(authorityKey, identity.blockRef, identity.recordId);
+    const cached = cache.getRecord(
+      authorityKey,
+      identity.blockRef,
+      identity.recordId,
+      freshnessKey
+    );
     if (cached) {
       setRecordLoad(cached);
       onRecordReadyRef.current(cached);
@@ -267,17 +298,25 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
       taskId: identity.taskId
     };
     void cache
-      .loadRecord({ ...identity, authorityKey }, () =>
-        api.getTaskWorkspaceRunDetail(runDetailInput)
+      .loadRecord(
+        { ...identity, authorityKey },
+        () => api.getTaskWorkspaceRunDetail(runDetailInput),
+        freshnessKey
       )
       .then((loaded) => {
-        if (selectionRequest.current !== request || selectionKey !== activeSelectionKey.current)
+        if (
+          selectionRequest.current !== request ||
+          `${selectionKey}\u0000${freshnessKey}` !== activeSelectionKey.current
+        )
           return;
         setRecordLoad(loaded);
         onRecordReadyRef.current(loaded);
       })
       .catch((error: unknown) => {
-        if (selectionRequest.current !== request || selectionKey !== activeSelectionKey.current)
+        if (
+          selectionRequest.current !== request ||
+          `${selectionKey}\u0000${freshnessKey}` !== activeSelectionKey.current
+        )
           return;
         setRecordLoad({
           ...idleTaskWorkspaceRecordLoad,
@@ -288,7 +327,17 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
           status: "error"
         });
       });
-  }, [api, authorityKey, cache, enabled, identity, selectionKey, syntheticLoad]);
+  }, [
+    api,
+    authorityKey,
+    cache,
+    enabled,
+    freshnessKey,
+    identity,
+    selectionKey,
+    setRecordLoad,
+    syntheticLoad
+  ]);
 
   const getRunScrollTop = useCallback(
     (recordId: string) => cache.getScrollTop(authorityKey, identity?.blockRef ?? "", recordId),
@@ -301,14 +350,15 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
   );
   const cachedRecordLoad =
     enabled && identity && !syntheticLoad
-      ? cache.getRecord(authorityKey, identity.blockRef, identity.recordId)
+      ? cache.getRecord(authorityKey, identity.blockRef, identity.recordId, freshnessKey)
       : null;
   const currentRecordLoad =
     identity &&
-    recordLoad.authorityKey === authorityKey &&
-    recordLoad.blockRef === identity.blockRef &&
-    recordLoad.key === identity.recordId
-      ? recordLoad
+    recordLoadState.freshnessKey === freshnessKey &&
+    recordLoadState.load.authorityKey === authorityKey &&
+    recordLoadState.load.blockRef === identity.blockRef &&
+    recordLoadState.load.key === identity.recordId
+      ? recordLoadState.load
       : idleTaskWorkspaceRecordLoad;
   const visibleRecordLoad = syntheticLoad ?? cachedRecordLoad ?? currentRecordLoad;
   return { getRunScrollTop, onRunScrollTopChange, recordLoad: visibleRecordLoad };

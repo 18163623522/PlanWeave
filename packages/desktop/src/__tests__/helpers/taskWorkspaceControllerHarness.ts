@@ -168,8 +168,8 @@ function controllerApi(options: { readModel: (recordId: string) => RunnerRecordR
         unsubscribe
       };
     }),
-    onRuntimeStateChanged: vi.fn(() => () => undefined),
-    onAutoRunChanged: vi.fn(() => () => undefined),
+    onRuntimeStateChanged: vi.fn<DesktopBridgeApi["onRuntimeStateChanged"]>(() => () => undefined),
+    onAutoRunChanged: vi.fn<DesktopBridgeApi["onAutoRunChanged"]>(() => () => undefined),
     updateBlockPrompt: vi.fn(async () => ({
       ok: true,
       affectedTasks: ["T-001"],

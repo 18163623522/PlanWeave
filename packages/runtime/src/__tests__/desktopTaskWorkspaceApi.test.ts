@@ -463,6 +463,60 @@ describe("desktop Task Workspace aggregate API", () => {
     });
   });
 
+  it("reads terminal and later submitted content from the same CLI run id", async () => {
+    const { root, init } = await createTestWorkspace();
+    const runId = "RUN-REPORT-LATER";
+    const recordId = `T-001#B-001::${runId}`;
+    const runDir = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs", runId);
+    await claimNext({ projectRoot: root });
+    await writeBlockRun({
+      resultsDir: init.workspace.resultsDir,
+      blockId: "B-001",
+      runId,
+      startedAt: "2026-07-13T00:00:00.000Z",
+      finishedAt: null
+    });
+    const input = { projectRoot: root, canvasId: "default", taskId: "T-001", recordId };
+
+    const running = await getTaskWorkspaceRunDetail(input);
+    expect(running.record.reportMarkdown).toBe("");
+    expect(running.record.runnerReadModel).toBeNull();
+    expect(running.item.run.duration.finishedAt).toBeNull();
+
+    await writeJsonFile(join(runDir, "metadata.json"), {
+      runId,
+      ref: "T-001#B-001",
+      executor: "codex",
+      adapter: "codex-exec",
+      startedAt: "2026-07-13T00:00:00.000Z",
+      finishedAt: "2026-07-13T00:00:03.000Z",
+      exitCode: 0
+    });
+    const terminal = await getTaskWorkspaceRunDetail(input);
+    expect(terminal.item.run.duration.finishedAt).toBe("2026-07-13T00:00:03.000Z");
+    expect(terminal.record.reportMarkdown).toBe("");
+
+    await submitBlockResult({
+      projectRoot: root,
+      ref: "T-001#B-001",
+      runId,
+      reportPath: await writeReport(root, "implementation.md")
+    });
+    const submitted = await getTaskWorkspaceRunDetail(input);
+    expect(submitted.record.runId).toBe(runId);
+    expect(submitted.record.reportMarkdown).toBe("report\n");
+    expect(submitted.record.displayMarkdownSource).toBe("report");
+    expect(submitted.item.run.metadata.submittedAt).toEqual(expect.any(String));
+    const page = await listTaskWorkspaceRuns({
+      projectRoot: root,
+      canvasId: "default",
+      taskId: "T-001"
+    });
+    expect(
+      page.items.find((item) => item.run.record.recordId === recordId)?.run.metadata.submittedAt
+    ).toEqual(expect.any(String));
+  });
+
   it("groups each feedback run with its source review attempt without duplicate feedback rows", async () => {
     const { root, init } = await createTestWorkspace();
     await claimNext({ projectRoot: root });

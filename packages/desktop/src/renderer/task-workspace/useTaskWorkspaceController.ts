@@ -46,6 +46,7 @@ import {
   type TaskWorkspaceRecordLoad,
   useTaskWorkspaceRecordCache
 } from "./useTaskWorkspaceRecordCache";
+import { useTaskWorkspaceRunFreshness } from "./useTaskWorkspaceRunFreshness";
 import { useTaskWorkspaceConversationSource } from "./useTaskWorkspaceConversationSource";
 import {
   agentFamilyFromExecutorName,
@@ -168,7 +169,12 @@ export function useTaskWorkspaceController(options: {
   } = options;
   const navigation = history.taskWorkspaceNavigation;
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const refresh = useCallback(() => setRefreshVersion((current) => current + 1), []);
+  const [detailVersion, setDetailVersion] = useState(0);
+  const runFreshness = useTaskWorkspaceRunFreshness();
+  const refresh = useCallback(() => {
+    setRefreshVersion((current) => current + 1);
+    setDetailVersion((current) => current + 1);
+  }, []);
   const [workspaceLoad, setWorkspaceLoad] = useState<WorkspaceLoad>(idleWorkspaceLoad);
   const [overviewSelected, setOverviewSelected] = useState(false);
   const [selectedAnnotationIdentity, setSelectedAnnotationIdentity] = useState<{
@@ -280,6 +286,7 @@ export function useTaskWorkspaceController(options: {
             );
           }
           runItemsRef.current = [];
+          runFreshness.replace([]);
           nextCursorRef.current = null;
           setHasMoreRuns(false);
           setLoadMoreRunsError(null);
@@ -374,7 +381,25 @@ export function useTaskWorkspaceController(options: {
           ...item,
           selected: selectedHint !== null && item.run.record.recordId === selectedHint
         }));
-        const composed = composeTaskWorkspaceRuns(header, pageItems);
+        const pageIds = new Set(pageItems.map((item) => item.run.record.recordId));
+        if (
+          runFreshness.shouldRefreshSelectedOffPage({
+            authorityKey: key,
+            blockRef: currentNavigation.blockRef ?? null,
+            recordId: selectedHint,
+            blocks: header.blocks,
+            onFirstPage: selectedHint !== null && pageIds.has(selectedHint)
+          })
+        ) {
+          setDetailVersion((current) => current + 1);
+        }
+        const composed = composeTaskWorkspaceRuns(
+          {
+            ...header,
+            activeRecordIds: header.activeRecordIds.filter((recordId) => pageIds.has(recordId))
+          },
+          pageItems
+        );
         const agentHints = new Map<string, RemoteLiveAgentHint>();
         for (const block of composed.blocks) {
           const graphBlock = graphTask.blocks.find((candidate) => candidate.ref === block.ref);
@@ -391,6 +416,7 @@ export function useTaskWorkspaceController(options: {
         }
         const workspace = withRemoteLiveTimelineRuns(composed, agentHints);
         runItemsRef.current = pageItems;
+        runFreshness.replace(pageItems);
         nextCursorRef.current = runsPage.nextCursor;
         setHasMoreRuns(runsPage.nextCursor !== null);
         setLoadMoreRunsError(null);
@@ -488,6 +514,8 @@ export function useTaskWorkspaceController(options: {
     history.replaceTaskWorkspaceTarget,
     key,
     refreshVersion,
+    runFreshness.replace,
+    runFreshness.shouldRefreshSelectedOffPage,
     workspaceCanvas?.projection
   ]);
 
@@ -521,6 +549,7 @@ export function useTaskWorkspaceController(options: {
     : (navigation?.recordId ?? routedSelectedRun?.item.run.record.recordId ?? "");
   const selectedBlockRef =
     selectedAnnotation?.block.ref ?? navigation?.blockRef ?? routedSelectedRun?.block.ref ?? "";
+  const runFreshnessKey = runFreshness.freshnessById.get(selectedRecordKey) ?? "";
   const selectedRemoteExecution = workspace?.blocks.find(
     (block) => block.ref === selectedBlockRef
   )?.remoteExecution;
@@ -591,6 +620,8 @@ export function useTaskWorkspaceController(options: {
   const onRecordReady = useCallback(
     (loaded: TaskWorkspaceRecordLoad) => {
       if (loaded.item?.run.kind !== "block" || !loaded.blockRef) return;
+      if (!runFreshness.matches(loaded)) return;
+      runFreshness.noteSelectedDetail(key, loaded);
       const listItem: TaskWorkspaceRunListItem = {
         blockRef: loaded.blockRef,
         ...loaded.item
@@ -601,15 +632,21 @@ export function useTaskWorkspaceController(options: {
       runItemsRef.current = [...without, listItem];
       setWorkspaceLoad((current) => {
         if (!current.workspace || current.key !== key) return current;
+        const sourceWorkspace = {
+          ...current.workspace,
+          activeRecordIds: current.workspace.activeRecordIds.filter(
+            (id) => loaded.item?.active || id !== loaded.key
+          )
+        };
         return {
           ...current,
           workspace: withRemoteLiveTimelineRuns(
-            composeTaskWorkspaceRuns(current.workspace, runItemsRef.current)
+            composeTaskWorkspaceRuns(sourceWorkspace, runItemsRef.current)
           )
         };
       });
     },
-    [key]
+    [key, runFreshness.matches, runFreshness.noteSelectedDetail]
   );
   const {
     getRunScrollTop,
@@ -618,7 +655,12 @@ export function useTaskWorkspaceController(options: {
   } = useTaskWorkspaceRecordCache({
     api,
     authorityKey: key,
-    enabled: !overviewSelected && selectedAnnotation === null,
+    enabled:
+      workspaceLoad.key === key &&
+      workspaceLoad.status === "ready" &&
+      !overviewSelected &&
+      selectedAnnotation === null,
+    freshnessKey: `${runFreshnessKey}\u0000${detailVersion}`,
     identity: recordIdentity,
     onRecordReady,
     syntheticLoad: syntheticRecordLoad
@@ -646,6 +688,17 @@ export function useTaskWorkspaceController(options: {
 
   const selectedRecord =
     visibleRecordLoad.key === selectedRecordKey ? visibleRecordLoad.record : null;
+  const cliPollKey =
+    selectedRun?.item.run.metadata.runnerKind === "cli" &&
+    selectedRun.item.active &&
+    (selectedRecord?.finishedAt === null || visibleRecordLoad.status === "error")
+      ? `${key}\u0000${selectedRecordKey}\u0000${detailVersion}`
+      : null;
+  useEffect(() => {
+    if (!cliPollKey) return;
+    const timer = setTimeout(() => setDetailVersion((current) => current + 1), 2_500);
+    return () => clearTimeout(timer);
+  }, [cliPollKey]);
   const initialModel = selectedRecord?.runnerReadModel ?? null;
   const canvasRef = useMemo(
     () =>
@@ -804,6 +857,7 @@ export function useTaskWorkspaceController(options: {
           selected: selectedHint !== null && item.run.record.recordId === selectedHint
         }));
       runItemsRef.current = [...runItemsRef.current, ...appended];
+      runFreshness.append(appended);
       nextCursorRef.current = page.nextCursor;
       setHasMoreRuns(page.nextCursor !== null);
       setWorkspaceLoad((current) => {
@@ -828,7 +882,7 @@ export function useTaskWorkspaceController(options: {
         setLoadingMoreRuns(false);
       }
     }
-  }, [api, key, localNavigation]);
+  }, [api, key, localNavigation, runFreshness.append]);
 
   const { saveBlockPrompt, saveTaskPrompt } = useTaskWorkspacePromptActions({
     api,

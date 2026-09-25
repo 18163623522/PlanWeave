@@ -753,5 +753,12 @@ describe("Task Workspace selected run controller", () => {
     expect(result.current.error).toBe("Run record could not be read.");
     expect(result.current.workspace).not.toBeNull();
     expect(result.current.selectedRun).not.toBeNull();
+
+    act(() => result.current.refresh());
+    await waitFor(() =>
+      expect(result.current.selectedRecord?.recordId).toBe("T-001#B-001::RUN-001")
+    );
+    expect(result.current.recordError).toBeNull();
+    expect(api.getTaskWorkspaceRunDetail).toHaveBeenCalledTimes(2);
   });
 });
