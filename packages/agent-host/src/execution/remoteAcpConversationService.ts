@@ -8,6 +8,7 @@ import type {
   AcpEngineInteractionContext
 } from "@planweave-ai/runtime";
 import type { AcpConversationRepository } from "../state/acpConversationRepository.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import type { HostTransportClock } from "../transport/hostTransport.js";
 import { systemHostTransportClock } from "../transport/hostTransport.js";
 import { RemoteAcpConversationSetupError, type RemoteAcpExecutor } from "./remoteAcpExecutor.js";
@@ -20,12 +21,19 @@ export class RemoteAcpConversationService {
   private readonly sessions = new Map<string, string>();
   private readonly unsafeSessions = new Set<string>();
   private readonly runs = new Set<Promise<void>>();
+  private readonly deadlineChecks = new Map<string, () => void>();
+  private readonly serverClock: CalibratedServerClock;
   private stopped = false;
   constructor(
     private readonly repository: AcpConversationRepository,
     private readonly executor: Pick<RemoteAcpExecutor, "converse">,
-    private readonly clock: HostTransportClock = systemHostTransportClock
+    private readonly clock: HostTransportClock = systemHostTransportClock,
+    serverClock?: CalibratedServerClock
   ) {
+    this.serverClock = serverClock ?? new CalibratedServerClock(clock);
+    this.serverClock.subscribe(() => {
+      for (const check of this.deadlineChecks.values()) check();
+    });
     for (const sessionId of repository.unsafeSessions()) this.unsafeSessions.add(sessionId);
   }
 
@@ -83,15 +91,17 @@ export class RemoteAcpConversationService {
     const deadlineMs = Date.parse(command.expiresAt);
     let timer: unknown;
     const checkDeadline = () => {
-      if (this.clock.now().getTime() >= deadlineMs) {
+      if (timer !== undefined) this.clock.clearTimeout(timer);
+      if (this.serverClock.now().getTime() >= deadlineMs) {
         controller.abort("acp_conversation_deadline_exceeded");
       } else {
         timer = this.clock.setTimeout(
           checkDeadline,
-          Math.min(1_000, deadlineMs - this.clock.now().getTime())
+          Math.min(1_000, deadlineMs - this.serverClock.now().getTime())
         );
       }
     };
+    this.deadlineChecks.set(turnId, checkDeadline);
     checkDeadline();
     const run = this.execute(turnId, controller, deadlineMs)
       .catch((failure) => {
@@ -100,6 +110,7 @@ export class RemoteAcpConversationService {
       })
       .finally(() => {
         if (timer !== undefined) this.clock.clearTimeout(timer);
+        this.deadlineChecks.delete(turnId);
         this.active.delete(turnId);
         this.sessions.delete(command.sessionId);
         this.runs.delete(run);
@@ -126,7 +137,7 @@ export class RemoteAcpConversationService {
     try {
       const command = this.repository.command(turnId);
       if (this.repository.cancelled(turnId)) controller.abort();
-      if (this.clock.now().getTime() >= deadlineMs)
+      if (this.serverClock.now().getTime() >= deadlineMs)
         throw new Error("acp_conversation_deadline_exceeded");
       if (controller.signal.aborted) throw new Error("acp_conversation_cancelled");
       executorStarted = true;
@@ -158,7 +169,7 @@ export class RemoteAcpConversationService {
       cleanupSafe = outcome.cleanup.completed;
       if (!cleanupSafe) throw new Error("acp_conversation_cleanup_failed");
       if (
-        this.clock.now().getTime() >= deadlineMs ||
+        this.serverClock.now().getTime() >= deadlineMs ||
         controller.signal.reason === "acp_conversation_deadline_exceeded"
       )
         throw new Error("acp_conversation_deadline_exceeded");
@@ -178,7 +189,7 @@ export class RemoteAcpConversationService {
       )
         cleanupSafe = false;
       const deadline =
-        this.clock.now().getTime() >= deadlineMs ||
+        this.serverClock.now().getTime() >= deadlineMs ||
         controller.signal.reason === "acp_conversation_deadline_exceeded";
       status = deadline ? "failed" : controller.signal.aborted ? "cancelled" : "failed";
       // Engine diagnostics are delivered through its redacted runner events.
@@ -217,7 +228,7 @@ export class RemoteAcpConversationService {
               decision:
                 option.kind === "allow_once" || option.kind === "allow_always" ? "approve" : "deny"
             })),
-            deadline: context.deadline.toISOString()
+            deadline: this.repository.command(turnId).expiresAt
           },
           context
         );
@@ -235,7 +246,7 @@ export class RemoteAcpConversationService {
             requestId: request.requestId,
             message: request.message,
             requestedSchema: z.record(z.string(), z.unknown()).parse(request.requestedSchema),
-            deadline: context.deadline.toISOString()
+            deadline: this.repository.command(turnId).expiresAt
           },
           context
         );
@@ -269,7 +280,7 @@ export class RemoteAcpConversationService {
             abort();
             return;
           }
-          if (Date.now() >= context.deadline.getTime()) {
+          if (this.serverClock.now().getTime() >= Date.parse(request.deadline)) {
             finish(new Error("acp_conversation_interaction_expired"));
             return;
           }

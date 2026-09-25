@@ -32,6 +32,7 @@ import {
   ensureDurableHostIdentity
 } from "../state/durableHostIdentity.js";
 import { AgentHostClient } from "../transport/agentHostClient.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import { ConfiguredCanvasRuntimeResolver } from "../runtime/canvasRuntimeResolver.js";
 import {
   CanvasRuntimeService,
@@ -647,6 +648,7 @@ export class AgentHostOperator {
       );
       const interactionRelay = new DurableAcpInteractionRelay(state);
       const canvasRuntimeResolver = new ConfiguredCanvasRuntimeResolver(config);
+      const serverClock = new CalibratedServerClock();
       const executor = new RemoteAcpExecutor({
         workspaceResolver: new ConfiguredWorkspaceResolver(config),
         runtimeWorkspaceResolver: {
@@ -665,6 +667,7 @@ export class AgentHostOperator {
         outbox: state,
         interactionResponder: interactionRelay,
         hostCapabilities: capabilities,
+        serverClock,
         // Remote Host ACP work commonly exceeds the local 30s engine default (tool calls + writeback).
         limits: {
           operationTimeoutMs: 15 * 60_000,
@@ -708,7 +711,13 @@ export class AgentHostOperator {
         state,
         executor,
         interactionRelay,
-        conversations: new RemoteAcpConversationService(state.conversations, executor),
+        conversations: new RemoteAcpConversationService(
+          state.conversations,
+          executor,
+          undefined,
+          serverClock
+        ),
+        serverClock,
         canvasRuntime,
         allowInsecureTransport: config.coordinator.allowInsecureDevelopment,
         ca: trust.ca,

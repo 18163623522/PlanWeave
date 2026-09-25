@@ -17,6 +17,7 @@ import { openAgentHostState, type AgentHostState } from "../state/agentHostState
 import { openAgentHostDatabase } from "../state/sqliteDatabase.js";
 import { RemoteAcpExecutor } from "../execution/remoteAcpExecutor.js";
 import { RemoteAcpConversationService } from "../execution/remoteAcpConversationService.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import type { HostTransportClock } from "../transport/hostTransport.js";
 const fixtures: { directory: string; state: AgentHostState }[] = [];
 afterEach(async () => {
@@ -311,6 +312,79 @@ describe("Host remote ACP continuation", () => {
     await service.stop();
   }, 20_000);
 
+  it.each([
+    -60_000, 60_000
+  ])("completes a real ACP load and prompt with a %i ms Host clock skew", async (skewMs) => {
+    const f = await setup();
+    const mockAgent = fileURLToPath(
+      new URL("../../../runtime/src/__tests__/support/acpMockAgent.mjs", import.meta.url)
+    );
+    const profile = {
+      agentId: exampleExecutionEnvelopeInput.agentId,
+      capabilityPolicy: { required: [], optional: [] },
+      shutdown: DEFAULT_ACP_SHUTDOWN_POLICY,
+      launch: {
+        trusted: true as const,
+        command: process.execPath,
+        args: [mockAgent, "load-capable"]
+      },
+      env: {}
+    };
+    const fresh = await executeAcp({
+      launch: profile.launch,
+      workspace: { cwd: f.directory },
+      env: {},
+      clientInfo: { name: "PlanWeave skew test", version: "1.0.0" },
+      shutdown: profile.shutdown,
+      capabilityPolicy: profile.capabilityPolicy,
+      prompt: "Create a fresh session",
+      sessionStart: { kind: "new" }
+    });
+    expect(fresh.terminal.state).toBe("succeeded");
+    expect(fresh.cleanup.completed).toBe(true);
+    const actualNow = Date.now.bind(Date);
+    const serverClock = new CalibratedServerClock({ now: () => new Date(actualNow() + skewMs) });
+    serverClock.synchronize(new Date(actualNow()).toISOString());
+    const executor = new RemoteAcpExecutor({
+      workspaceResolver: { resolve: () => ({ cwd: f.directory }) },
+      runtimeWorkspaceResolver: { resolve: () => ({ cwd: f.directory }) },
+      profileResolver: { resolve: () => profile },
+      outbox: { append: vi.fn() },
+      hostCapabilities: [],
+      serverClock
+    });
+    const command = {
+      ...f.command,
+      sessionId: fresh.sessionId!,
+      expiresAt: new Date(actualNow() + 10_000).toISOString()
+    };
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      executor,
+      undefined,
+      serverClock
+    );
+    f.receive(command);
+    service.handle(command);
+    const localDateNow = vi.spyOn(Date, "now").mockImplementation(() => actualNow() + skewMs);
+    try {
+      await vi.waitFor(
+        () => {
+          expect(f.state.pendingEvents()).toContainEqual(
+            expect.objectContaining({
+              turnId: command.turnId,
+              payload: { kind: "status", status: "completed", error: null }
+            })
+          );
+        },
+        { timeout: 10_000 }
+      );
+      await service.stop();
+    } finally {
+      localDateNow.mockRestore();
+    }
+  }, 20_000);
+
   it("expires before startup and stops a running turn at the absolute deadline", async () => {
     const f = await setup();
     const now = Date.now();
@@ -363,6 +437,199 @@ describe("Host remote ACP continuation", () => {
         payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
       })
     );
+  });
+
+  it.each([
+    -60_000, 60_000
+  ])("uses the Server deadline when the Host clock is offset by %i ms", async (skewMs) => {
+    const f = await setup();
+    const serverNow = Date.now();
+    const time = controlledClock(serverNow + skewMs);
+    const serverClock = new CalibratedServerClock(time.clock);
+    serverClock.synchronize(new Date(serverNow).toISOString());
+    const observed = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    let signal: AbortSignal | undefined;
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(
+      async (_command, _broker, _sink, value) => {
+        signal = value;
+        return observed.promise;
+      }
+    );
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      { converse },
+      time.clock,
+      serverClock
+    );
+    const command = { ...f.command, expiresAt: new Date(serverNow + 1_000).toISOString() };
+    f.receive(command);
+    service.handle(command);
+    await flush();
+    expect(converse).toHaveBeenCalledTimes(1);
+    time.advance(999);
+    expect(signal?.aborted).toBe(false);
+    time.advance(1);
+    expect(signal?.reason).toBe("acp_conversation_deadline_exceeded");
+    observed.resolve(success);
+    await service.stop();
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+  });
+
+  it("rechecks a running turn on Server clock recalibration and retains the last offset offline", async () => {
+    const f = await setup();
+    const serverNow = Date.now();
+    const time = controlledClock(serverNow - 60_000);
+    const serverClock = new CalibratedServerClock(time.clock);
+    serverClock.synchronize(new Date(serverNow).toISOString());
+    const observed = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    let signal: AbortSignal | undefined;
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(
+      async (_command, _broker, _sink, value) => {
+        signal = value;
+        return observed.promise;
+      }
+    );
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      { converse },
+      time.clock,
+      serverClock
+    );
+    const command = { ...f.command, expiresAt: new Date(serverNow + 2_000).toISOString() };
+    f.receive(command);
+    service.handle(command);
+    await flush();
+    time.advance(500);
+    serverClock.synchronize(new Date(serverNow + 1_500).toISOString());
+    expect(signal?.aborted).toBe(false);
+    time.advance(499);
+    expect(signal?.aborted).toBe(false);
+    time.advance(1);
+    expect(signal?.reason).toBe("acp_conversation_deadline_exceeded");
+    observed.resolve(success);
+    await service.stop();
+  });
+
+  it.each([
+    { kind: "permission" as const, skewMs: -60_000 },
+    { kind: "elicitation" as const, skewMs: 60_000 }
+  ])("bounds a waiting $kind interaction by Server time", async ({ kind, skewMs }) => {
+    const f = await setup();
+    const serverNow = Date.now();
+    const time = controlledClock(serverNow + skewMs);
+    const serverClock = new CalibratedServerClock(time.clock);
+    serverClock.synchronize(new Date(serverNow).toISOString());
+    const command = { ...f.command, expiresAt: new Date(serverNow + 1_000).toISOString() };
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(
+      async (_command, broker, _sink, signal) => {
+        try {
+          if (kind === "permission") {
+            await broker.requestPermission(
+              {
+                requestId: "waiting-permission",
+                sessionId: command.sessionId,
+                toolCallId: "tool",
+                summary: "Allow tool",
+                options: [{ optionId: "allow", label: "Allow", kind: "allow_once" }]
+              },
+              { signal, deadline: new Date(time.clock.now().getTime() + 1_000) }
+            );
+          } else {
+            await broker.requestElicitation(
+              {
+                requestId: "waiting-elicitation",
+                sessionId: command.sessionId,
+                message: "Provide input",
+                requestedSchema: {}
+              },
+              { signal, deadline: new Date(time.clock.now().getTime() + 1_000) }
+            );
+          }
+        } catch (error) {
+          expect(error).toEqual(expect.objectContaining({ message: "acp_conversation_cancelled" }));
+        }
+        return success;
+      }
+    );
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      { converse },
+      time.clock,
+      serverClock
+    );
+    f.receive(command);
+    service.handle(command);
+    await flush();
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: command.turnId,
+        payload: {
+          kind: "interaction",
+          request: expect.objectContaining({ kind, deadline: command.expiresAt })
+        }
+      })
+    );
+    time.advance(999);
+    expect(f.state.pendingEvents()).not.toContainEqual(
+      expect.objectContaining({
+        turnId: command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+    time.advance(1);
+    await service.stop();
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: command.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+  });
+
+  it("checks a same-session queued turn against its original Server deadline", async () => {
+    const f = await setup();
+    const serverNow = Date.now();
+    const time = controlledClock(serverNow - 60_000);
+    const serverClock = new CalibratedServerClock(time.clock);
+    serverClock.synchronize(new Date(serverNow).toISOString());
+    const first = deferred<Awaited<ReturnType<RemoteAcpExecutor["converse"]>>>();
+    const converse = vi.fn<RemoteAcpExecutor["converse"]>(async (command) =>
+      command.turnId === f.command.turnId ? first.promise : success
+    );
+    const service = new RemoteAcpConversationService(
+      f.state.conversations,
+      { converse },
+      time.clock,
+      serverClock
+    );
+    const running = { ...f.command, expiresAt: new Date(serverNow + 10_000).toISOString() };
+    const queued = {
+      ...f.command,
+      turnId: "turn-queued-expiry",
+      expiresAt: new Date(serverNow + 1_000).toISOString()
+    };
+    f.receive(running);
+    service.handle(running);
+    f.receive(queued);
+    service.handle(queued);
+    await flush();
+    expect(converse).toHaveBeenCalledTimes(1);
+    time.advance(1_000);
+    first.resolve(success);
+    await flush();
+    expect(converse).toHaveBeenCalledTimes(1);
+    expect(f.state.pendingEvents()).toContainEqual(
+      expect.objectContaining({
+        turnId: queued.turnId,
+        payload: { kind: "status", status: "failed", error: "acp_conversation_deadline_exceeded" }
+      })
+    );
+    await service.stop();
   });
 
   it("holds a same-session turn until cleanup finishes while another session proceeds", async () => {

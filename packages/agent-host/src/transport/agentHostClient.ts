@@ -44,6 +44,7 @@ import {
   systemHostTransportClock
 } from "./hostTransport.js";
 import { ExecutionLeaseDeadline } from "./executionLeaseDeadline.js";
+import { CalibratedServerClock } from "./calibratedServerClock.js";
 import {
   parseReconnectBackoffOptions,
   reconnectDelay,
@@ -87,6 +88,7 @@ export type AgentHostClientOptions = {
   request: typeof fetch;
   reconnect?: Partial<ReconnectBackoffOptions>;
   clock?: HostTransportClock;
+  serverClock?: CalibratedServerClock;
   random?: () => number;
   limits?: Partial<HostTransportLimits>;
   logger?: HostTransportLogger;
@@ -180,7 +182,7 @@ export class AgentHostClient implements HostTransport {
   private restartAfterStop = false;
   private lifecycleGeneration = 0;
   private recoveredGeneration = 0;
-  private serverClockOffsetMs = 0;
+  private readonly serverClock: CalibratedServerClock;
   private readonly leaseDeadline: ExecutionLeaseDeadline;
   private leaseProtectionActive = false;
   private leaseProtectionFailed = false;
@@ -200,6 +202,7 @@ export class AgentHostClient implements HostTransport {
       throw new Error("agent_host_capacity_out_of_range");
     }
     this.clock = options.clock ?? systemHostTransportClock;
+    this.serverClock = options.serverClock ?? new CalibratedServerClock(this.clock);
     this.limits = parseHostTransportLimits(options.limits);
     this.leaseDeadline = new ExecutionLeaseDeadline(this.clock, () => {
       this.checkExecutionLeases();
@@ -567,7 +570,7 @@ export class AgentHostClient implements HostTransport {
         this.welcomed = true;
         this.reconnectAttempt = 0;
         this.transition({ state: "connected", connectedAt: this.clock.now().toISOString() });
-        this.serverClockOffsetMs = Date.parse(event.serverTime) - this.clock.now().getTime();
+        this.serverClock.synchronize(event.serverTime, this.clock.now());
         this.options.canvasRuntime?.synchronizeServerTime(event.serverTime, this.clock.now());
         if (this.recoveredGeneration !== this.lifecycleGeneration) {
           this.recoveredGeneration = this.lifecycleGeneration;
@@ -838,7 +841,7 @@ export class AgentHostClient implements HostTransport {
   }
 
   private serverNow(): Date {
-    return new Date(this.clock.now().getTime() + this.serverClockOffsetMs);
+    return this.serverClock.now();
   }
 
   private checkExecutionLeases(): boolean {
@@ -859,7 +862,7 @@ export class AgentHostClient implements HostTransport {
       }
       const next = this.options.state.nextLeaseExpiresAt();
       this.leaseDeadline.reschedule(
-        next === undefined ? undefined : Date.parse(next) - this.serverClockOffsetMs
+        next === undefined ? undefined : this.serverClock.localDeadlineMs(next)
       );
       return true;
     } catch {

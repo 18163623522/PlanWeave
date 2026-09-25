@@ -39,6 +39,7 @@ import type {
 } from "./remoteAcpPorts.js";
 import { agentHostRemoteEngineEventSchema } from "./remoteAcpPorts.js";
 import { agentHostPackageVersion } from "../packageInfo.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import { prepareInputArtifacts } from "./inputArtifactWorkspace.js";
 
 type RemoteAcpExecutorOptions = {
@@ -49,6 +50,7 @@ type RemoteAcpExecutorOptions = {
   hostCapabilities: readonly string[];
   interactionResponder?: AgentHostRemoteInteractionResponder;
   limits?: Partial<AcpExecutionLimits>;
+  serverClock?: CalibratedServerClock;
 };
 
 export const AGENT_HOST_RESUME_PROMPT =
@@ -223,9 +225,11 @@ function interactionBroker(options: {
 
 export class RemoteAcpExecutor implements AgentHostExecutor {
   private readonly hostCapabilities: ReadonlySet<string>;
+  private readonly serverClock: CalibratedServerClock;
 
   constructor(private readonly options: RemoteAcpExecutorOptions) {
     this.hostCapabilities = new Set(options.hostCapabilities);
+    this.serverClock = options.serverClock ?? new CalibratedServerClock();
   }
 
   private async resolveContext(
@@ -335,7 +339,7 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
           );
         }
       );
-      if (signal.aborted || Date.now() >= Date.parse(command.expiresAt)) {
+      if (signal.aborted || this.serverClock.remainingMs(command.expiresAt) <= 0) {
         throw new Error("acp_conversation_deadline_exceeded");
       }
     } catch (cause) {
@@ -355,12 +359,12 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
       sessionStart: { kind: "load", sessionId: command.sessionId },
       authentication: planWeaveAcpExecutionAuthentication(profile.authentication),
       interactionBroker,
-      interactionDeadline: () => new Date(command.expiresAt),
+      interactionDeadline: () => this.serverClock.localDeadline(command.expiresAt),
       lifecycleObserver: async (event) => {
         if (event.kind === "session_ready")
           configuration = sessionConfigurationFromNewSession(event.session);
         if (event.kind === "prompt_starting") {
-          if (signal.aborted || Date.now() >= Date.parse(command.expiresAt))
+          if (signal.aborted || this.serverClock.remainingMs(command.expiresAt) <= 0)
             throw new Error("acp_conversation_deadline_exceeded");
           prompting = true;
           if (configuration)
@@ -396,7 +400,7 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
       poolIdentity: hostPoolIdentity(profile, workspace.cwd),
       limits: {
         ...this.options.limits,
-        operationTimeoutMs: Math.max(1, Date.parse(command.expiresAt) - Date.now())
+        operationTimeoutMs: Math.max(1, this.serverClock.remainingMs(command.expiresAt))
       }
     });
     return { terminal: result.terminal, cleanup: result.cleanup };

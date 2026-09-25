@@ -19,6 +19,7 @@ import { WebSocketServer } from "ws";
 import { AgentHostExecutionError, type AgentHostExecutor } from "../execution/agentHostExecutor.js";
 import { openAgentHostState, type AgentHostState } from "../state/agentHostState.js";
 import { AgentHostClient } from "../transport/agentHostClient.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import { FakeHostTransportClock } from "./support/hostTransportTestClock.js";
 import { remoteRunnerEventV2Request } from "./support/remoteRunnerEventCapabilityTestValues.js";
 
@@ -176,6 +177,49 @@ function acknowledge(socket: import("ws").WebSocket, event: HostEvent): void {
 }
 
 describe("Agent Host outbound transport", () => {
+  it("calibrates the shared Server clock before recovering conversations", async () => {
+    const httpServer = createServer();
+    httpServers.push(httpServer);
+    const webSocketServer = new WebSocketServer({ server: httpServer });
+    webSocketServers.push(webSocketServer);
+    const clock = new FakeHostTransportClock();
+    const serverClock = new CalibratedServerClock(clock);
+    const serverTime = new Date(clock.now().getTime() + 60_000).toISOString();
+    const recovered = deferred<void>();
+    const conversations = {
+      handle: vi.fn(),
+      recover: vi.fn(() => {
+        expect(serverClock.now().toISOString()).toBe(serverTime);
+        recovered.resolve();
+      }),
+      stop: vi.fn(async () => undefined),
+      isSessionActive: vi.fn(() => false)
+    };
+    webSocketServer.on("connection", (socket) => {
+      socket.once("message", () => socket.send(JSON.stringify({ ...welcome(), serverTime })));
+    });
+    const port = await listen(httpServer);
+    const state = await openState();
+    const client = new AgentHostClient({
+      serverUrl: `http://127.0.0.1:${port}`,
+      hostId: "host-client-001",
+      token: "host-token",
+      capabilities: ["test"],
+      capacity: 1,
+      state,
+      executor: { execute: vi.fn() },
+      conversations,
+      serverClock,
+      clock,
+      request: remoteRunnerEventV2Request,
+      allowInsecureTransport: true
+    });
+    clients.push(client);
+    client.start();
+    await recovered.promise;
+    expect(conversations.recover).toHaveBeenCalledTimes(1);
+  });
+
   it("requires successful v2 discovery before opening the Host socket", async () => {
     const httpServer = createServer();
     httpServers.push(httpServer);
