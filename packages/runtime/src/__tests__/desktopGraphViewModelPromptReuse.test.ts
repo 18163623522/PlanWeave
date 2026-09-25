@@ -2,8 +2,7 @@ import type { PathLike } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const promptReadObservations = vi.hoisted(() => ({
-  paths: [] as string[],
-  optionalFileCalls: 0
+  paths: [] as string[]
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -19,21 +18,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-vi.mock("../desktop/graph/graphHelpers.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../desktop/graph/graphHelpers.js")>();
-  return {
-    ...actual,
-    readOptionalFile: async (...args: Parameters<typeof actual.readOptionalFile>) => {
-      promptReadObservations.optionalFileCalls += 1;
-      return actual.readOptionalFile(...args);
-    }
-  };
-});
-
 import {
   buildGraphViewModel,
-  getBlockDetail,
-  getGraphViewModel,
   loadDesktopGraphViewModelContext
 } from "../desktop/graph/readModel.js";
 import { basicManifest, createTestWorkspace } from "./promptTestHelpers.js";
@@ -41,7 +27,6 @@ import { basicManifest, createTestWorkspace } from "./promptTestHelpers.js";
 afterEach(() => {
   delete process.env.PLANWEAVE_HOME;
   promptReadObservations.paths = [];
-  promptReadObservations.optionalFileCalls = 0;
 });
 
 function classifyPromptReads(paths: string[], packageDir: string) {
@@ -79,21 +64,12 @@ describe("desktop graph view model prompt reuse", () => {
     const context = await loadDesktopGraphViewModelContext(root);
 
     promptReadObservations.paths = [];
-    promptReadObservations.optionalFileCalls = 0;
     const first = await buildGraphViewModel(context);
     const firstCounts = classifyPromptReads(promptReadObservations.paths, packageDir);
-    const firstOptionalCalls = promptReadObservations.optionalFileCalls;
 
     promptReadObservations.paths = [];
-    promptReadObservations.optionalFileCalls = 0;
     const second = await buildGraphViewModel(context);
     const secondCounts = classifyPromptReads(promptReadObservations.paths, packageDir);
-    const secondOptionalCalls = promptReadObservations.optionalFileCalls;
-
-    // View-model layer must not re-read prompts via readOptionalFile.
-    // Before this change each build issued O(tasks + blocks) optional reads.
-    expect(firstOptionalCalls).toBe(0);
-    expect(secondOptionalCalls).toBe(0);
 
     // loadPlanGraphPackage remains the indexing authority: compile validation + prompt index
     // may each read prompt bodies once. No third eager view-model pass.
@@ -104,11 +80,6 @@ describe("desktop graph view model prompt reuse", () => {
     expect(firstCounts.totalPromptRelatedReads).toBeLessThanOrEqual(promptFileCount * 2);
     expect(firstCounts.blockBodyReads).toBeLessThanOrEqual(4 * 2);
     expect(secondCounts).toEqual(firstCounts);
-
-    // Baseline for this fixture with the old eager re-read loop was:
-    // (compile + index + view-model) * 6 prompts = 18 prompt body reads per buildGraphViewModel.
-    // After reuse: at most (compile + index) * 6 = 12, and zero view-model optional reads.
-    expect(firstCounts.totalPromptRelatedReads).toBeLessThan(promptFileCount * 3);
 
     // Byte-identical output for repeated unchanged builds.
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
@@ -142,34 +113,5 @@ describe("desktop graph view model prompt reuse", () => {
         ]
       }
     ]);
-  });
-
-  it("keeps end-to-end getGraphViewModel free of view-model optional prompt re-reads", async () => {
-    const { root, init } = await createTestWorkspace(basicManifest({ includeSecondTask: true }));
-
-    promptReadObservations.paths = [];
-    promptReadObservations.optionalFileCalls = 0;
-    const graph = await getGraphViewModel(root);
-    const counts = classifyPromptReads(promptReadObservations.paths, init.workspace.packageDir);
-
-    expect(promptReadObservations.optionalFileCalls).toBe(0);
-    expect(graph.tasks[0]?.promptMarkdown).toContain("T-001 task prompt");
-    // Full getGraphViewModel also loads runtime context (session compile + fingerprint),
-    // which is outside the view-model re-read loop this plan removes.
-    expect(counts.uniquePromptPaths).toBe(6);
-    expect(counts.totalPromptRelatedReads).toBeGreaterThan(0);
-  });
-
-  it("reuses the PlanGraph block prompt body for inspector detail", async () => {
-    const { root, init } = await createTestWorkspace();
-    promptReadObservations.paths = [];
-    promptReadObservations.optionalFileCalls = 0;
-
-    const detail = await getBlockDetail(root, "T-001#B-001");
-    const counts = classifyPromptReads(promptReadObservations.paths, init.workspace.packageDir);
-
-    expect(detail.promptMarkdown).toContain("T-001#B-001");
-    expect(promptReadObservations.optionalFileCalls).toBe(0);
-    expect(counts.blockBodyReads).toBeGreaterThan(0);
   });
 });

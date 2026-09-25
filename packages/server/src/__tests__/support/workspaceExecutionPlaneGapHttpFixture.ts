@@ -1,5 +1,5 @@
 import { createServer, type Server as HttpServer } from "node:http";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -374,13 +374,18 @@ function serverListen(server: HttpServer, resolve: () => void) {
 export async function startPathlessCompositionWithGrantedHost(options: {
   mapWorkspace: boolean;
   liveCanvasRuntime?: boolean | { failOperation?: PathlessCanvasRuntimeFailure };
+  staleLocalRuntime?: boolean;
 }) {
   const workspace = await createTestWorkspace(remoteManifest());
   directories.push(workspace.home, workspace.root);
   const httpServer = createServer();
   httpServers.push(httpServer);
   const dataDirectory = join(workspace.root, "pathless-gap-server-data");
-  const projectId = "pathless-gap-project";
+  const localWorkspace = options.staleLocalRuntime
+    ? await createTestWorkspace(remoteManifest(), { planweaveHome: workspace.home })
+    : undefined;
+  if (localWorkspace) directories.push(localWorkspace.root);
+  const projectId = localWorkspace?.init.workspace.id ?? "pathless-gap-project";
   const workspaceId = "workspace-self-host";
   const canvasId = "default";
   const blockRef = "T-001#B-001";
@@ -390,7 +395,9 @@ export async function startPathlessCompositionWithGrantedHost(options: {
     publicUrl: "http://127.0.0.1:7443",
     allowInsecureDevelopment: true,
     dataDirectory,
-    trustedProjects: [],
+    trustedProjects: localWorkspace
+      ? [{ workspaceId, projectId, canvasId, projectRoot: localWorkspace.root }]
+      : [],
     operatorCredentials: [
       {
         operatorId: "admin",
@@ -402,29 +409,37 @@ export async function startPathlessCompositionWithGrantedHost(options: {
   });
   const composition = await createDistributedServerComposition({ httpServer, config });
   compositions.push(composition);
+  if (localWorkspace) {
+    await writeFile(
+      join(localWorkspace.init.workspace.packageDir, "nodes/T-001/prompt.md"),
+      "Local prompt diverged from the Server content authority.\n"
+    );
+  }
   const database = await openServerDatabase(config.databasePath, 5_000);
   databases.push(database);
   const access = new ProjectAccessRepository(database);
   const workspaceIdentity = new WorkspaceIdentityRepository(database);
-  access.registerProjectInternal({
-    workspaceId,
-    projectId,
-    projectRoot: workspace.root
-  });
-  access.registerCanvasInternal({
-    workspaceId,
-    projectId,
-    canvasId,
-    packageDir: workspace.root
-  });
-  database
-    .prepare("UPDATE project_registry SET project_root_internal=NULL WHERE project_id=?")
-    .run(projectId);
-  database
-    .prepare(
-      "UPDATE canvas_registry SET package_dir_internal=NULL WHERE project_id=? AND canvas_id=?"
-    )
-    .run(projectId, canvasId);
+  if (!localWorkspace) {
+    access.registerProjectInternal({
+      workspaceId,
+      projectId,
+      projectRoot: workspace.root
+    });
+    access.registerCanvasInternal({
+      workspaceId,
+      projectId,
+      canvasId,
+      packageDir: workspace.root
+    });
+    database
+      .prepare("UPDATE project_registry SET project_root_internal=NULL WHERE project_id=?")
+      .run(projectId);
+    database
+      .prepare(
+        "UPDATE canvas_registry SET package_dir_internal=NULL WHERE project_id=? AND canvas_id=?"
+      )
+      .run(projectId, canvasId);
+  }
   workspaceIdentity.ensureLegacyProjectAdapter(projectId, workspaceId);
   const hosts = new AgentHostRepository(
     database,
@@ -474,11 +489,13 @@ export async function startPathlessCompositionWithGrantedHost(options: {
     authorityProjectId: projectId
   });
   const contentVersions = new ContentVersionRepository(database);
-  contentVersions.publishInitial({
-    scope: { workspaceId, projectId, canvasId },
-    content: captured.content,
-    createdBy: { kind: "system", id: "pathless-gap-content" }
-  });
+  if (!localWorkspace) {
+    contentVersions.publishInitial({
+      scope: { workspaceId, projectId, canvasId },
+      content: captured.content,
+      createdBy: { kind: "system", id: "pathless-gap-content" }
+    });
+  }
   const contentEvidence = readStableCanvasRuntimeEvidence(contentVersions, {
     workspaceId,
     projectId,
@@ -540,6 +557,10 @@ export async function startPathlessCompositionWithGrantedHost(options: {
     })(),
     contentGraphFingerprint,
     disconnectCanvasRuntime,
+    async advertiseCanvasRuntime() {
+      if (!runtimeHandle) throw new Error("test_canvas_runtime_not_connected");
+      await runtimeHandle.advertiseRuntime();
+    },
     listRuntimeBindings() {
       return database
         .prepare(

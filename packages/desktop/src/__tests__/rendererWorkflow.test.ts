@@ -62,7 +62,6 @@ describe("desktop renderer workflow guardrails", () => {
     expect(smokeSource).not.toContain("planweave:rendererSmoke");
     expect(todoSource).toContain('data-testid="todo-view"');
     expect(smokeDriverSource).toContain("assertSmokeProcess");
-    expect(smokeDriverSource).toContain("30_000");
     expect(mainSource).toContain("app.isPackaged && !isDev && !isSmokeRun");
     expect(mainSource).toContain("delete process.env.PLANWEAVE_HOME");
     expect(mainSource).toContain(

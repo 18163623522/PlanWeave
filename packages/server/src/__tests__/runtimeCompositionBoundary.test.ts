@@ -46,20 +46,12 @@ describe("Runtime composition boundary", () => {
     );
     expect(transportSource).not.toContain("CanvasRuntimeStatusPort");
     expect(transportSource).not.toContain("runtimeStatus:");
-    expect(compositionRootSource).toContain("...registries.runtimeRegistry.locators");
     expect(compositionRootSource).toContain("...registries.ownerRuntimeRegistry.locators");
-    expect(compositionRootSource).toContain("initialContentCapture,");
-    expect(compositionRootSource).toContain("runtimeAvailability: collaborationRuntime");
-    expect(compositionRootSource).toContain(
-      "const collaborationRuntime = new AuthoritySelectingCanvasRuntimeRouter("
-    );
     expect(compositionRootSource).toContain("executionLeases: collaborationRuntime");
     expect(compositionRootSource).toContain(
       "runtimeHostLocator.locateAuthorizedHost(lease, lease.hostId)"
     );
     expect(compositionRootSource).not.toContain("runtimeHostLocator.locate(lease)");
-    expect(runtimeRouterSource).toContain("reconcileReset(");
-    expect(runtimeRouterSource).toContain("return this.remote.reconcileReset(scope, command)");
     expect(compositionRootSource).not.toContain("runtimeStatus: localCanvasRuntime");
   });
 

@@ -214,10 +214,16 @@ describe("workspace execution plane HTTP gaps", () => {
     expect(dispatched.status).toBe(202);
   });
 
-  it("first remote operation auto-prepares without pre-bound runtime host", async () => {
+  it.each([
+    { runtime: "no local attachment", staleLocalRuntime: false },
+    { runtime: "a stale local attachment", staleLocalRuntime: true }
+  ])("auto-prepares remote execution and reads remote authority with $runtime", async ({
+    staleLocalRuntime
+  }) => {
     const fixture = await startPathlessCompositionWithGrantedHost({
       mapWorkspace: true,
-      liveCanvasRuntime: true
+      liveCanvasRuntime: true,
+      staleLocalRuntime
     });
     expect(fixture.listRuntimeBindings()).toEqual([]);
     const dispatched = await fetch(dispatchUrl(fixture.origin, fixture.projectId), {
@@ -254,6 +260,7 @@ describe("workspace execution plane HTTP gaps", () => {
         reservation_lease_id: expect.any(String)
       })
     ]);
+    await fixture.advertiseCanvasRuntime();
     const availability = await fetch(
       `${fixture.origin}/api/v1/projects/${fixture.projectId}/canvases/${fixture.canvasId}/runtime-availability`,
       { headers: { Authorization: `Bearer ${fixture.ownerToken}` } }
@@ -261,7 +268,13 @@ describe("workspace execution plane HTTP gaps", () => {
     expect(availability.status).toBe(200);
     await expect(availability.json()).resolves.toMatchObject({
       schemaVersion: "canvas-runtime-view/v1",
-      state: { kind: "initialized" }
+      state: { kind: "initialized" },
+      execution: {
+        kind: "available",
+        hostId: fixture.hostId,
+        sourceRevision: fixture.dispatchAuthority.contentRevision,
+        graphFingerprint: fixture.contentGraphFingerprint
+      }
     });
   });
 

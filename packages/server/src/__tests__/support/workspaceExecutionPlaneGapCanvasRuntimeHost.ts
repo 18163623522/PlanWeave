@@ -4,6 +4,7 @@ import {
   agentHostProtocolVersion
 } from "@planweave-ai/agent-host-protocol";
 import {
+  capturePackageSnapshot,
   createRemoteBlockRuntimePort,
   readAuthorizedCanvasRuntimeStatus
 } from "@planweave-ai/runtime";
@@ -16,6 +17,7 @@ export type PathlessCanvasRuntimeFailure = "acquire" | "inspect" | "content_out_
 
 export type PathlessCanvasRuntimeHostHandle = {
   disconnect(): void;
+  advertiseRuntime(): Promise<void>;
 };
 
 function graphFingerprintFrom(value: unknown): string | undefined {
@@ -158,6 +160,39 @@ export async function connectPathlessCanvasRuntimeHost(input: {
   });
 
   return {
+    async advertiseRuntime() {
+      const messageId = randomUUID();
+      const acknowledged = new Promise<void>((resolve) => {
+        const onMessage = (data: WebSocket.RawData) => {
+          const event = JSON.parse(data.toString()) as { type?: string; messageId?: string };
+          if (event.type === "host.event_ack" && event.messageId === messageId) {
+            socket.off("message", onMessage);
+            resolve();
+          }
+        };
+        socket.on("message", onMessage);
+      });
+      socket.send(
+        JSON.stringify({
+          type: "host.heartbeat",
+          protocolVersion: agentHostProtocolVersion,
+          messageId,
+          activeLeases: [],
+          readiness: {
+            workspaceMappings: [{ workspaceId: input.scope.workspaceId, status: "ready" }],
+            acpProfiles: [],
+            runtimeProjects: [
+              {
+                workspaceId: input.scope.workspaceId,
+                projectId: input.scope.projectId,
+                status: "ready"
+              }
+            ]
+          }
+        })
+      );
+      await acknowledged;
+    },
     disconnect() {
       socket.terminate();
     }
@@ -226,14 +261,18 @@ async function answerRuntimeRequest(input: {
       if (operation.operation === "status") {
         return { outcome: "success", operation: "status", result: status };
       }
+      const captured = await capturePackageSnapshot({
+        projectRoot,
+        canvasId: commandScope.canvasId
+      });
       return {
         outcome: "success",
         operation: "availability",
         result: {
           kind: "available",
           status,
-          sourceRevision: "src-pathless-runtime",
-          graphFingerprint: contentGraphFingerprint
+          sourceRevision: captured.snapshot.sourceRevision,
+          graphFingerprint: status.packageFingerprint
         }
       };
     }
