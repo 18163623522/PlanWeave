@@ -768,6 +768,7 @@
         "agentExposure.test.ts",
         "agentHostCli.test.ts",
         "agentHostClient.test.ts",
+        "agentHostConnectionLiveness.test.ts",
         "agentHostClientAdversarial.test.ts",
         "agentHostClientLoad.test.ts",
         "agentHostConfig.test.ts",

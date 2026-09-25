@@ -1,3 +1,4 @@
+import { HostConnectionWatchdog } from "./hostConnectionWatchdog.js";
 import type { RemoteAcpConversationService } from "../execution/remoteAcpConversationService.js";
 import { WebSocket } from "ws";
 import {
@@ -166,6 +167,7 @@ export class AgentHostClient implements HostTransport {
   private readonly listeners = new Set<HostTransportStatusListener>();
   private readonly inFlightEventIds = new Set<string>();
   private heartbeatTimer?: unknown;
+  private connectionWatchdog?: HostConnectionWatchdog;
   private reconnectTimer?: unknown;
   private currentStatus: HostTransportStatus = { state: "stopped" };
   private reconnectAttempt = 0;
@@ -244,6 +246,7 @@ export class AgentHostClient implements HostTransport {
       this.canvasRuns.size > 0
     )
       return;
+    this.connectionWatchdog?.stop();
     const generation = ++this.lifecycleGeneration;
     this.stopped = false;
     this.leaseProtectionActive = true;
@@ -383,6 +386,7 @@ export class AgentHostClient implements HostTransport {
 
   private async stopTransport(): Promise<void> {
     if (this.stopped && this.currentStatus.state === "stopped" && !this.startup) return;
+    this.connectionWatchdog?.stop();
     const generation = ++this.lifecycleGeneration;
     const reconciliationRequired = this.currentStatus.state === "reconciliation-required";
     this.stopped = true;
@@ -443,12 +447,24 @@ export class AgentHostClient implements HostTransport {
         [EXACT_PERMISSION_OPTIONS_VERSION_HEADER]: "1",
         [HISTORICAL_PERMISSION_REPLAY_VERSION_HEADER]: "1"
       },
+      handshakeTimeout: 30_000,
       maxPayload: this.limits.maxPayloadBytes,
       ca: this.options.ca
     });
     this.socket = socket;
+    const watchdog = new HostConnectionWatchdog(this.clock, () => {
+      if (this.socket !== socket || this.stopped) return;
+      this.options.logger?.log({
+        level: "warn",
+        event: "host_connection_timeout",
+        state: this.currentStatus.state
+      });
+      socket.terminate();
+    });
+    this.connectionWatchdog = watchdog;
     socket.on("open", () => {
       if (this.socket !== socket || this.stopped) return;
+      watchdog.received();
       const hello = serializeAgentHostHello({
         type: "host.hello",
         protocolVersion: 1,
@@ -482,6 +498,7 @@ export class AgentHostClient implements HostTransport {
           if (this.socket !== socket || this.stopped) return;
           if (isBinary) throw new Error("binary_messages_not_supported");
           const event = parseAgentHostServerEvent(JSON.parse(data.toString()));
+          watchdog.received(event.type === "host.welcome" ? event.heartbeatIntervalMs : undefined);
           await this.handleServerEvent(event);
         })
         .catch((error: unknown) => {
@@ -510,6 +527,7 @@ export class AgentHostClient implements HostTransport {
     });
     socket.on("error", () => socket.terminate());
     socket.on("close", (code) => {
+      watchdog.stop();
       if (this.socket !== socket) return;
       this.socket = undefined;
       this.welcomed = false;
