@@ -12,6 +12,7 @@ import {
 import type { RememberedServerConnectionView } from "../../shared/collaboration";
 import { collaborationBridge } from "../bridge";
 import { useCollaborationStatus } from "../hooks/useCollaborationStatus";
+import { useOperatorControlStatusSnapshot } from "../hooks/useOperatorControlStatusSnapshot";
 import type { createTranslator } from "../i18n";
 import { collaborationConnectionErrorMessage } from "../collaboration/formatCollaborationError";
 import { serverDeploymentLabel } from "./serverDeploymentLabel";
@@ -26,6 +27,7 @@ export function ServerConnectionList({
   t: ReturnType<typeof createTranslator>;
 }) {
   const { status, refresh } = useCollaborationStatus();
+  const operatorStatus = useOperatorControlStatusSnapshot();
   const [servers, setServers] = useState<RememberedServerConnectionView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -141,7 +143,12 @@ export function ServerConnectionList({
             const connecting = active && status?.workspaceConnection.status === "connecting";
             const connected = active && status?.workspaceConnection.status === "connected";
             return (
-              <ServerManagementAuthorization key={group.origin} serverOrigin={group.origin} t={t}>
+              <ServerManagementAuthorization
+                key={group.origin}
+                serverOrigin={group.origin}
+                operatorStatus={operatorStatus}
+                t={t}
+              >
                 {(access) => (
                   <div
                     className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_1fr_.7fr_11rem] items-center gap-4 border-b border-border/60 py-5 text-sm"

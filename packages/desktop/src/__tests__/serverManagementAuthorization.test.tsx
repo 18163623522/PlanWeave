@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ServerManagementAuthorization } from "../renderer/settings/ServerManagementAuthorization";
+import { useOperatorControlStatusSnapshot } from "../renderer/hooks/useOperatorControlStatusSnapshot";
 import { createTranslator } from "../renderer/i18n";
 
 const api = vi.hoisted(() => ({
@@ -80,6 +81,73 @@ it("does not let a late initial status replace a newer status event", async () =
   await act(async () => initial.resolve(status));
   await userEvent.click(screen.getByRole("button", { name: t("serverManagementDetails") }));
   expect(screen.getByTestId("management-server-identity")).toHaveTextContent("new-admin");
+});
+
+it("does not roll back the operator identity on an older status event", async () => {
+  const initial = { ...status, updatedAt: "2030-01-01T00:00:00.001Z" };
+  api.getOperatorControlStatus.mockResolvedValue(initial);
+  await load();
+  const newer = {
+    ...initial,
+    updatedAt: "2030-01-01T00:00:00.003Z",
+    profiles: [{ ...status.profiles[0], operatorId: "new-admin" }]
+  };
+  await act(async () => statusChanged(newer));
+  await act(async () => statusChanged({ ...initial, updatedAt: "2030-01-01T00:00:00.002Z" }));
+  expect(screen.getByTestId("management-server-identity")).toHaveTextContent("new-admin");
+  expect(api.getOperatorControlStatus).toHaveBeenCalledTimes(1);
+});
+
+it("checks the authoritative status when same-timestamp events disagree", async () => {
+  const initial = { ...status, updatedAt: "2030-01-01T00:00:00.001Z" };
+  api.getOperatorControlStatus.mockResolvedValue(initial);
+  await load();
+  const latest = {
+    ...initial,
+    updatedAt: "2030-01-01T00:00:00.002Z",
+    profiles: [{ ...status.profiles[0], operatorId: "latest-admin" }]
+  };
+  api.getOperatorControlStatus.mockResolvedValue(latest);
+  await act(async () => statusChanged({ ...latest, updatedAt: initial.updatedAt }));
+  await waitFor(() =>
+    expect(screen.getByTestId("management-server-identity")).toHaveTextContent("latest-admin")
+  );
+  expect(api.getOperatorControlStatus).toHaveBeenCalledTimes(2);
+});
+
+it("does not verify an old import after the same profile loses its credential", async () => {
+  await load();
+  const imported = deferred<typeof status>();
+  api.importOperatorCredential.mockReturnValue(imported.promise);
+  await userEvent.click(screen.getByText(t("serverManagementAdvanced")));
+  await userEvent.click(screen.getByRole("button", { name: t("serverManagementImport") }));
+  await act(async () =>
+    statusChanged({
+      ...status,
+      profiles: [{ ...status.profiles[0], hasOperatorCredential: false }]
+    })
+  );
+  api.getManagementAuthorization.mockResolvedValue(ready);
+  await act(async () => imported.resolve(status));
+  expect(screen.queryByText(t("serverManagementVerified"))).not.toBeInTheDocument();
+  expect(screen.getByTestId("management-server-identity")).toHaveTextContent("admin");
+});
+
+it("keeps an import success when its own status event arrives before the response", async () => {
+  await load();
+  const imported = deferred<typeof status>();
+  api.importOperatorCredential.mockReturnValue(imported.promise);
+  await userEvent.click(screen.getByText(t("serverManagementAdvanced")));
+  await userEvent.click(screen.getByRole("button", { name: t("serverManagementImport") }));
+  const next = {
+    ...status,
+    profiles: [{ ...status.profiles[0], credentialRevision: "imported" }]
+  };
+  api.getManagementAuthorization.mockResolvedValue(ready);
+  await act(async () => statusChanged(next));
+  await act(async () => imported.resolve(next));
+  expect(await screen.findByText(t("serverManagementVerified"))).toBeInTheDocument();
+  expect(api.getOperatorControlStatus).toHaveBeenCalledTimes(1);
 });
 
 it("hides authorization and devices as soon as the same profile loses its credential", async () => {
@@ -257,7 +325,7 @@ it("accepts recovery's own credential status event and keeps its success", async
     ...status,
     profiles: [{ ...status.profiles[0], credentialRevision: "recovered" }]
   };
-  api.getOperatorControlStatus.mockResolvedValue(next);
+  api.getOperatorControlStatus.mockRejectedValueOnce(new Error("operator_management_failed"));
   api.getManagementAuthorization.mockResolvedValue(ready);
   await act(async () => statusChanged(next));
   await act(async () => recovered.resolve(ready));
@@ -501,8 +569,9 @@ afterEach(() => {
 });
 const t = createTranslator("zh-CN");
 function Authorization({ origin = "https://one.example" }: { origin?: string }) {
+  const operatorStatus = useOperatorControlStatusSnapshot();
   return (
-    <ServerManagementAuthorization serverOrigin={origin} t={t}>
+    <ServerManagementAuthorization serverOrigin={origin} operatorStatus={operatorStatus} t={t}>
       {(access) => (
         <>
           <span>{access.label}</span>

@@ -1,6 +1,7 @@
 import { ManagementDialog } from "../components/ManagementDialog";
 import { type ReactNode, useEffect, useState } from "react";
 import { useServerManagementAuthorization } from "../hooks/useServerManagementAuthorization";
+import type { OperatorControlStatusSnapshot } from "../hooks/useOperatorControlStatusSnapshot";
 import { Button } from "@/components/ui/button";
 import { operatorControlBridge } from "../bridge";
 import type { createTranslator } from "../i18n";
@@ -9,10 +10,12 @@ import { formatHostAdministrationError } from "./hostAdministrationErrors";
 
 export function ServerManagementAuthorization({
   serverOrigin,
+  operatorStatus,
   children,
   t
 }: {
   serverOrigin: string;
+  operatorStatus: OperatorControlStatusSnapshot;
   children: (access: {
     label: string | null;
     recoveryNeeded: boolean;
@@ -38,7 +41,7 @@ export function ServerManagementAuthorization({
     revoke,
     selectProfile,
     refresh
-  } = useServerManagementAuthorization(serverOrigin);
+  } = useServerManagementAuthorization(serverOrigin, operatorStatus);
   const [open, setOpen] = useState(false);
   const [revokeDraft, setRevokeDraft] = useState<{
     generation: number;
@@ -70,8 +73,9 @@ export function ServerManagementAuthorization({
     "operator_device_revoked"
   ].includes(displayedError ?? "");
   const authorized = Boolean(management?.authorization && !displayedError);
-  const stateText =
-    status && profiles.length === 0
+  const stateText = operatorStatus.loading
+    ? t("serverManagementChecking")
+    : status && profiles.length === 0
       ? t("serverManagementEmpty")
       : checking
         ? t("serverManagementChecking")
@@ -86,7 +90,7 @@ export function ServerManagementAuthorization({
   return (
     <>
       {children({
-        label: profile ? stateText : null,
+        label: profile || operatorStatus.loading || operatorStatus.error ? stateText : null,
         recoveryNeeded,
         disabled: !profile || checking,
         open: () => setOpen(true)

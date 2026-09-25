@@ -1,29 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import type { OperatorControlStatus, OperatorProfileView } from "../../shared/operatorControl";
+import type { OperatorProfileView } from "../../shared/operatorControl";
 import type { OperatorManagementView } from "../../shared/operatorManagement";
 import { operatorControlBridge } from "../bridge";
 import { hostAdministrationErrorCode } from "../settings/hostAdministrationErrors";
+import {
+  originOf,
+  selectedProfile,
+  type OperatorControlStatusSnapshot
+} from "./useOperatorControlStatusSnapshot";
 
 type Authority = { key: string; generation: number };
 type Bound<T> = { generation: number; value: T };
-
-function originOf(url: string): string {
-  return new URL(url).origin;
-}
-
-function selectedProfile(
-  status: OperatorControlStatus | null,
-  selectedId: string | null,
-  origin: string
-) {
-  const profiles = status?.profiles.filter((item) => originOf(item.serverBaseUrl) === origin) ?? [];
-  const profile =
-    profiles.find((item) => item.profileId === selectedId) ??
-    profiles.find((item) => item.profileId === status?.activeProfileId) ??
-    profiles[0] ??
-    null;
-  return { profiles, profile };
-}
 
 function authorityKey(profile: OperatorProfileView | null, origin: string): string {
   return JSON.stringify(
@@ -48,17 +35,18 @@ function sameTarget(profile: OperatorProfileView | null, original: OperatorProfi
   );
 }
 
-export function useServerManagementAuthorization(serverOrigin: string) {
-  const [status, setStatus] = useState<OperatorControlStatus | null>(null);
+export function useServerManagementAuthorization(
+  serverOrigin: string,
+  operatorStatus: OperatorControlStatusSnapshot
+) {
+  const { status } = operatorStatus;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [errorState, setError] = useState<Bound<string> | null>(null);
   const [busyState, setBusy] = useState<Bound<boolean> | null>(null);
   const [checkingState, setChecking] = useState<Bound<boolean> | null>(null);
   const [verifiedState, setVerified] = useState<Bound<string> | null>(null);
   const [managementState, setManagement] = useState<Bound<OperatorManagementView> | null>(null);
-  const statusRef = useRef(status);
   const selectedRef = useRef(selectedId);
-  const eventVersion = useRef(0);
   const requestSequence = useRef(0);
   const operationSequence = useRef(0);
   const actionInFlight = useRef<{
@@ -84,7 +72,7 @@ export function useServerManagementAuthorization(serverOrigin: string) {
   }
   const generation = authority.current.generation;
   const current = () =>
-    selectedProfile(statusRef.current, selectedRef.current, serverOrigin).profile;
+    selectedProfile(operatorStatus.current(), selectedRef.current, serverOrigin).profile;
   const syncAuthority = () => {
     const currentProfile = current();
     if (actionInFlight.current && !sameTarget(currentProfile, actionInFlight.current.target)) {
@@ -97,44 +85,12 @@ export function useServerManagementAuthorization(serverOrigin: string) {
       requestSequence.current += 1;
     }
   };
-  const applyStatus = (next: OperatorControlStatus) => {
-    statusRef.current = next;
-    syncAuthority();
-    if (mounted.current) setStatus(next);
-  };
-  const applyStatusRef = useRef(applyStatus);
-  applyStatusRef.current = applyStatus;
-
   useEffect(() => {
-    const bridge = operatorControlBridge;
-    if (!bridge) return;
     mounted.current = true;
-    let active = true;
-    const update = (next: OperatorControlStatus) => {
-      if (!active) return;
-      eventVersion.current += 1;
-      applyStatusRef.current(next);
-    };
-    const unsubscribe = bridge.onOperatorControlStatusChanged(update);
-    const initialVersion = eventVersion.current;
-    void bridge.getOperatorControlStatus().then(
-      (next) => {
-        if (active && eventVersion.current === initialVersion) applyStatusRef.current(next);
-      },
-      (cause) => {
-        if (active && eventVersion.current === initialVersion)
-          setError({
-            generation: authority.current.generation,
-            value: hostAdministrationErrorCode(cause)
-          });
-      }
-    );
     return () => {
-      active = false;
       mounted.current = false;
       requestSequence.current += 1;
       operationSequence.current += 1;
-      unsubscribe();
     };
   }, []);
 
@@ -205,7 +161,15 @@ export function useServerManagementAuthorization(serverOrigin: string) {
     profile?.hasOperatorCredential
       ? managementState.value
       : null;
-  const error = errorState?.generation === generation ? errorState.value : null;
+  const selectionConflict = profiles.some((item) => item.profileId === selectedId)
+    ? null
+    : operatorStatus.conflictOrigins[serverOrigin];
+  const error =
+    errorState?.generation === generation
+      ? errorState.value
+      : ((profileId ? operatorStatus.conflictErrors[profileId] : null) ??
+        selectionConflict ??
+        operatorStatus.error);
   const verifiedId = verifiedState?.generation === generation ? verifiedState.value : null;
 
   const run = async (
@@ -224,16 +188,18 @@ export function useServerManagementAuthorization(serverOrigin: string) {
     setVerified(null);
     let readSequence = ++requestSequence.current;
     let readGeneration = startingGeneration;
+    const actionAuthorityKey = authorityKey(target, serverOrigin);
     try {
       let view: OperatorManagementView;
       if (operation === "import") {
-        const before = eventVersion.current;
+        const before = operatorStatus.version();
         const next = await operatorControlBridge.importOperatorCredential({
           profileId: target.profileId,
           verifyBeforeSave: true
         });
         if (!stillTarget()) return false;
-        if (eventVersion.current === before) applyStatus(next);
+        operatorStatus.publish(next, before);
+        syncAuthority();
         if (!stillTarget()) return false;
         readGeneration = authority.current.generation;
         readSequence = ++requestSequence.current;
@@ -254,10 +220,14 @@ export function useServerManagementAuthorization(serverOrigin: string) {
                 })
               : await operatorControlBridge.reauthorizeManagement({ profileId: target.profileId });
         if (!stillTarget()) return false;
-        const before = eventVersion.current;
-        const next = await operatorControlBridge.getOperatorControlStatus();
+        const refreshed = await operatorStatus.refresh();
+        if (!refreshed.ok && authorityKey(current(), serverOrigin) === actionAuthorityKey) {
+          if (stillTarget())
+            setError({ generation: authority.current.generation, value: refreshed.error });
+          return false;
+        }
         if (!stillTarget()) return false;
-        if (eventVersion.current === before) applyStatus(next);
+        syncAuthority();
         if (!stillTarget()) return false;
         if (authority.current.generation !== startingGeneration) {
           readGeneration = authority.current.generation;
@@ -280,7 +250,11 @@ export function useServerManagementAuthorization(serverOrigin: string) {
       setManagement({ generation: resultGeneration, value: view });
       setError(null);
       setChecking({ generation: resultGeneration, value: false });
-      if (operation !== "revoke" && (view.errorCode || !view.authorization)) return false;
+      if (
+        operation !== "revoke" &&
+        (view.errorCode || !view.authorization || !current()?.hasOperatorCredential)
+      )
+        return false;
       if (operation !== "revoke")
         setVerified({ generation: resultGeneration, value: target.profileId });
       return true;
