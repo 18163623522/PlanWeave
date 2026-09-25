@@ -210,6 +210,10 @@ describe("SettingsServerSection", () => {
 
 it("opens HTTPS deployment guidance without changing local hosting or connecting a Server", async () => {
   mockThisComputerRunning();
+  collaborationBridge.getDeploymentGuidance.mockImplementationOnce(async (input) => ({
+    target: input.target,
+    handoff: { state: "unsupported", reason: "not_available" }
+  }));
   collaborationBridge.getActiveWorkspaceConnection.mockResolvedValue(localOnlyConnection);
   render(<SettingsServerSection maintenance t={createTranslator("en")} />);
   await screen.findByTestId("deployment-topology");

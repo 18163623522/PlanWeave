@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIcon, ChevronDownIcon, ChevronUpIcon, Link2Icon } from "lucide-react";
+import { deploymentTargetDraftSchema } from "@planweave-ai/collaboration-protocol/deployment";
 import type {
   ConnectivityValidationView,
   DeploymentGuidanceView,
@@ -43,6 +44,26 @@ import {
 } from "./useDeploymentConnectionDraft";
 
 type ExistingServerTools = "visible" | "collapsed" | "hidden";
+type TargetIdentity = { key: string | null; generation: number };
+type CheckState<T> =
+  | { generation: number; request: number; status: "loading" }
+  | { generation: number; request: number; status: "ready"; value: T }
+  | { generation: number; request: number; status: "error" };
+type OperationState<T extends string> = {
+  generation: number;
+  request: number;
+  status: "loading" | "error" | T;
+};
+
+function currentIdentity(
+  identity: { current: TargetIdentity },
+  key: string | null
+): TargetIdentity {
+  if (identity.current.key !== key) {
+    identity.current = { key, generation: identity.current.generation + 1 };
+  }
+  return identity.current;
+}
 
 const settingsGroupClass = "gap-0";
 const settingsRowClass =
@@ -203,15 +224,28 @@ export function DeploymentConnectionCard({
     useState<Extract<DeploymentTopology, "loopback_https" | "private_https" | "public_https">>(
       "public_https"
     );
-  const [guidance, setGuidance] = useState<DeploymentGuidanceView | null>(null);
-  const [connectivity, setConnectivity] = useState<ConnectivityValidationView | null>(null);
-  const [busy, setBusy] = useState<
-    "activation" | "guidance" | "validation" | "copy" | "export" | "connect" | null
-  >(null);
-  const [notice, setNotice] = useState<
-    "copied" | "exported" | "invalid" | "needs_project" | "invalid_project" | null
-  >(null);
+  const [guidanceState, setGuidanceState] = useState<CheckState<DeploymentGuidanceView> | null>(
+    null
+  );
+  const [connectivityState, setConnectivityState] =
+    useState<CheckState<ConnectivityValidationView> | null>(null);
+  const [copyState, setCopyState] = useState<OperationState<"copied"> | null>(null);
+  const [exportState, setExportState] = useState<OperationState<
+    "exported" | "needs_project" | "invalid_project" | "cancelled"
+  > | null>(null);
+  const [busy, setBusy] = useState<"activation" | "connect" | null>(null);
+  const [activationNotice, setActivationNotice] = useState<"invalid" | null>(null);
   const [deployToolsOpen, setDeployToolsOpen] = useState(false);
+  const guidanceIdentityRef = useRef<TargetIdentity>({ key: null, generation: 0 });
+  const connectivityIdentityRef = useRef<TargetIdentity>({ key: null, generation: 0 });
+  const requestSequence = useRef({ guidance: 0, validation: 0, copy: 0, export: 0 });
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const existingServer = mode === "custom_https";
   const showExistingServerDeploy = existingServer && existingServerTools !== "hidden";
@@ -224,7 +258,7 @@ export function DeploymentConnectionCard({
       const trimmedDisplayName = displayName.trim();
       if (mode !== "custom_https" || !trimmedDisplayName) return null;
       const serverOrigin = normalizedOrigin(origin);
-      return {
+      const draft = {
         schemaVersion: "deployment-target-draft/v1",
         displayName: trimmedDisplayName,
         endpoint: {
@@ -235,6 +269,7 @@ export function DeploymentConnectionCard({
         },
         capabilities: ["deployment_guidance", "connectivity_validation"]
       } satisfies DeploymentTargetDraft;
+      return deploymentTargetDraftSchema.safeParse(draft).success ? draft : null;
     } catch {
       return null;
     }
@@ -246,7 +281,7 @@ export function DeploymentConnectionCard({
       const serverOrigin = normalizedOrigin(origin);
       const hostname = new URL(serverOrigin).hostname;
       if (!hostname) return null;
-      return {
+      const draft = {
         schemaVersion: "deployment-target-draft/v1",
         displayName: displayName.trim() || hostname,
         endpoint: {
@@ -257,10 +292,35 @@ export function DeploymentConnectionCard({
         },
         capabilities: ["deployment_guidance", "connectivity_validation"]
       } satisfies DeploymentTargetDraft;
+      return deploymentTargetDraftSchema.safeParse(draft).success ? draft : null;
     } catch {
       return null;
     }
   }, [customTopology, displayName, mode, origin]);
+
+  const guidanceKey = target === null ? null : JSON.stringify(target);
+  const connectivityKey = originTarget === null ? null : JSON.stringify(originTarget.endpoint);
+  const guidanceIdentity = currentIdentity(guidanceIdentityRef, guidanceKey);
+  const connectivityIdentity = currentIdentity(connectivityIdentityRef, connectivityKey);
+  const visibleGuidanceState =
+    guidanceState?.generation === guidanceIdentity.generation ? guidanceState : null;
+  const visibleConnectivityState =
+    connectivityState?.generation === connectivityIdentity.generation ? connectivityState : null;
+  const visibleCopyState = copyState?.generation === guidanceIdentity.generation ? copyState : null;
+  const visibleExportState =
+    exportState?.generation === guidanceIdentity.generation ? exportState : null;
+  const guidance = visibleGuidanceState?.status === "ready" ? visibleGuidanceState.value : null;
+  const connectivity =
+    visibleConnectivityState?.status === "ready" ? visibleConnectivityState.value : null;
+  const guidanceLoading = visibleGuidanceState?.status === "loading";
+  const validationLoading = visibleConnectivityState?.status === "loading";
+  const copyLoading = visibleCopyState?.status === "loading";
+  const exportLoading = visibleExportState?.status === "loading";
+  const actionError =
+    visibleGuidanceState?.status === "error" ||
+    visibleConnectivityState?.status === "error" ||
+    visibleCopyState?.status === "error" ||
+    visibleExportState?.status === "error";
 
   const activate = async () => {
     if (!collaborationBridge || mode === "custom_https") return;
@@ -269,80 +329,92 @@ export function DeploymentConnectionCard({
       const next = await collaborationBridge.setDesktopServerExposureMode({ mode });
       setExposure(next);
       onExposureChange?.(next);
-      setNotice(next.lifecycle === "error" ? "invalid" : null);
+      setActivationNotice(next.lifecycle === "error" ? "invalid" : null);
       await onConnected?.();
     } catch {
-      setNotice("invalid");
+      setActivationNotice("invalid");
     } finally {
       setBusy(null);
     }
   };
 
-  const actionScope = () => (target ? { target } : null);
-
   const requestGuidance = async () => {
-    const scope = actionScope();
-    const input = scope ? { action: "request_deployment_guidance" as const, ...scope } : null;
-    if (!collaborationBridge || !input) return setNotice("invalid");
-    setBusy("guidance");
+    if (!collaborationBridge || !target) return;
+    const input = { action: "request_deployment_guidance" as const, target };
+    const { generation } = guidanceIdentity;
+    const request = ++requestSequence.current.guidance;
+    const isCurrent = () =>
+      mounted.current &&
+      guidanceIdentityRef.current.generation === generation &&
+      requestSequence.current.guidance === request;
+    setGuidanceState({ generation, request, status: "loading" });
     try {
-      setGuidance(await collaborationBridge.getDeploymentGuidance(input));
-      setNotice(null);
+      const value = await collaborationBridge.getDeploymentGuidance(input);
+      if (isCurrent()) {
+        setGuidanceState(
+          JSON.stringify(value.target) === guidanceKey
+            ? { generation, request, status: "ready", value }
+            : { generation, request, status: "error" }
+        );
+      }
     } catch {
-      setNotice("invalid");
-    } finally {
-      setBusy(null);
+      if (isCurrent()) setGuidanceState({ generation, request, status: "error" });
     }
   };
 
   const validate = async () => {
-    const scopedTarget = originTarget ?? target;
-    const input = scopedTarget
-      ? { action: "validate_connectivity" as const, target: scopedTarget }
-      : null;
-    if (!collaborationBridge || !input) return setNotice("invalid");
-    setBusy("validation");
+    if (!collaborationBridge || !originTarget) return;
+    const input = { action: "validate_connectivity" as const, target: originTarget };
+    const { generation } = connectivityIdentity;
+    const request = ++requestSequence.current.validation;
+    const isCurrent = () =>
+      mounted.current &&
+      connectivityIdentityRef.current.generation === generation &&
+      requestSequence.current.validation === request;
+    setConnectivityState({ generation, request, status: "loading" });
     try {
-      setConnectivity(await collaborationBridge.validateDeploymentConnectivity(input));
-      setNotice(null);
+      const value = await collaborationBridge.validateDeploymentConnectivity(input);
+      if (isCurrent()) setConnectivityState({ generation, request, status: "ready", value });
     } catch {
-      setNotice("invalid");
-    } finally {
-      setBusy(null);
+      if (isCurrent()) setConnectivityState({ generation, request, status: "error" });
     }
   };
 
   const copy = async () => {
-    const scope = actionScope();
-    const input = scope ? { action: "copy_supported_compose_handoff" as const, ...scope } : null;
-    if (!collaborationBridge || !input) return setNotice("invalid");
-    setBusy("copy");
+    if (!collaborationBridge || !guidance || !target) return;
+    const input = { action: "copy_supported_compose_handoff" as const, target: guidance.target };
+    const { generation } = guidanceIdentity;
+    const request = ++requestSequence.current.copy;
+    const isCurrent = () =>
+      mounted.current &&
+      guidanceIdentityRef.current.generation === generation &&
+      requestSequence.current.copy === request;
+    setCopyState({ generation, request, status: "loading" });
     try {
       await collaborationBridge.copyDeploymentComposeHandoff(input);
-      setNotice("copied");
+      if (isCurrent()) setCopyState({ generation, request, status: "copied" });
     } catch {
-      setNotice("invalid");
-    } finally {
-      setBusy(null);
+      if (isCurrent()) setCopyState({ generation, request, status: "error" });
     }
   };
 
   const exportBundle = async () => {
-    const scope = actionScope();
-    const input = scope ? { action: "export_supported_compose_bundle" as const, ...scope } : null;
-    if (!collaborationBridge || !input) return setNotice("invalid");
-    setBusy("export");
+    if (!collaborationBridge || !guidance || !target) return;
+    const input = { action: "export_supported_compose_bundle" as const, target: guidance.target };
+    const { generation } = guidanceIdentity;
+    const request = ++requestSequence.current.export;
+    const isCurrent = () =>
+      mounted.current &&
+      guidanceIdentityRef.current.generation === generation &&
+      requestSequence.current.export === request;
+    setExportState({ generation, request, status: "loading" });
     try {
       const result = await collaborationBridge.exportDeploymentComposeBundle(input);
-      if (result.state === "exported") setNotice("exported");
-      else if (result.state === "cancelled") setNotice(null);
-      else if (result.state === "needs_project") setNotice("needs_project");
-      else if (result.state === "invalid_project") setNotice("invalid_project");
-      else setNotice("invalid");
+      if (isCurrent()) {
+        setExportState({ generation, request, status: result.state });
+      }
     } catch {
-      setNotice("invalid");
-    } finally {
-      setBusy(null);
+      if (isCurrent()) setExportState({ generation, request, status: "error" });
     }
   };
 
@@ -505,7 +577,7 @@ export function DeploymentConnectionCard({
       <div className="flex flex-wrap gap-2 px-0 py-3.5">
         <Button
           type="button"
-          disabled={!target || busy !== null}
+          disabled={!target || busy !== null || guidanceLoading}
           onClick={() => void requestGuidance()}
         >
           {t("deploymentReview")}
@@ -514,7 +586,7 @@ export function DeploymentConnectionCard({
           <Button
             type="button"
             variant="outline"
-            disabled={!originTarget || busy !== null}
+            disabled={!originTarget || busy !== null || validationLoading}
             onClick={() => void validate()}
           >
             {t("deploymentValidate")}
@@ -652,7 +724,7 @@ export function DeploymentConnectionCard({
                 variant="outline"
                 className="px-3"
                 data-testid="deployment-check-connectivity"
-                disabled={busy !== null || !originTarget}
+                disabled={busy !== null || validationLoading || !originTarget}
                 onClick={() => void validate()}
               >
                 <ActivityIcon aria-hidden="true" data-icon="inline-start" />
@@ -733,7 +805,7 @@ export function DeploymentConnectionCard({
               <Button
                 type="button"
                 className="w-fit"
-                disabled={busy !== null}
+                disabled={busy !== null || copyLoading}
                 onClick={() => void copy()}
               >
                 {t("deploymentCopy")}
@@ -742,7 +814,7 @@ export function DeploymentConnectionCard({
                 type="button"
                 variant="outline"
                 className="w-fit"
-                disabled={busy !== null}
+                disabled={busy !== null || exportLoading}
                 onClick={() => void exportBundle()}
               >
                 {t("deploymentExport")}
@@ -759,23 +831,25 @@ export function DeploymentConnectionCard({
           {t("deploymentConnectivity")}: {connectivityLabel(connectivity, t)}
         </p>
       ) : null}
-      {notice === "copied" ? (
+      {visibleCopyState?.status === "copied" ? (
         <p className="text-xs" role="status">
           {t("deploymentCopied")}
         </p>
       ) : null}
-      {notice === "exported" ? <p className="text-xs">{t("deploymentExported")}</p> : null}
-      {notice === "needs_project" ? (
+      {visibleExportState?.status === "exported" ? (
+        <p className="text-xs">{t("deploymentExported")}</p>
+      ) : null}
+      {visibleExportState?.status === "needs_project" ? (
         <p className="text-xs text-destructive" role="alert">
           {t("deploymentExportNeedsProject")}
         </p>
       ) : null}
-      {notice === "invalid_project" ? (
+      {visibleExportState?.status === "invalid_project" ? (
         <p className="text-xs text-destructive" role="alert">
           {t("deploymentExportInvalidProject")}
         </p>
       ) : null}
-      {notice === "invalid" ? (
+      {actionError || (mode !== "custom_https" && activationNotice === "invalid") ? (
         <p className="text-xs text-destructive" role="alert">
           {t("deploymentInvalid")}
         </p>

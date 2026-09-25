@@ -134,6 +134,7 @@
         "credentialStorageSettingsView.test.tsx",
         "currentCanvasAccessPanel.test.tsx",
         "deploymentConnectionCard.test.tsx",
+        "deploymentConnectionCardLifecycle.test.tsx",
         "desktopAgentHostServiceMode.test.ts",
         "desktopBridgeContract.test.ts",
         "desktopCommandHandler.test.ts",
