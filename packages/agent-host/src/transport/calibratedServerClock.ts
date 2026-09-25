@@ -31,6 +31,10 @@ export class CalibratedServerClock {
     return new Date(this.localDeadlineMs(serverDeadline));
   }
 
+  serverDeadline(localDeadline: Date): Date {
+    return new Date(localDeadline.getTime() + this.offsetMs);
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

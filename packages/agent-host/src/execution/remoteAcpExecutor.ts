@@ -193,6 +193,7 @@ function interactionBroker(options: {
   identity: AgentHostRemoteExecutionIdentity;
   outbox: AgentHostRemoteExecutionOutbox;
   responder?: AgentHostRemoteInteractionResponder;
+  serverClock: CalibratedServerClock;
 }): AcpEngineInteractionBroker {
   return {
     advertiseElicitation: true,
@@ -201,7 +202,7 @@ function interactionBroker(options: {
         kind: "permission_request",
         identity: options.identity,
         request: { ...request, options: [...request.options] },
-        deadline: context.deadline.toISOString()
+        deadline: options.serverClock.serverDeadline(context.deadline).toISOString()
       });
       if (options.responder) {
         return options.responder.requestPermission(options.identity, request, context);
@@ -213,7 +214,7 @@ function interactionBroker(options: {
         kind: "elicitation_request",
         identity: options.identity,
         request,
-        deadline: context.deadline.toISOString()
+        deadline: options.serverClock.serverDeadline(context.deadline).toISOString()
       });
       if (options.responder) {
         return options.responder.requestElicitation(options.identity, request, context);
@@ -462,9 +463,6 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
         event: agentHostRemoteEngineEventSchema.parse({ ...event, sequence: ++sourceSequence })
       });
     };
-    const interactionTimeoutMs =
-      this.options.limits?.interactionTimeoutMs ??
-      DEFAULT_ACP_EXECUTION_LIMITS.interactionTimeoutMs;
     let executionOutcome:
       | { status: "succeeded"; result: Awaited<ReturnType<typeof executeAcp>> }
       | { status: "failed"; error: unknown };
@@ -490,12 +488,9 @@ export class RemoteAcpExecutor implements AgentHostExecutor {
           interactionBroker: interactionBroker({
             identity,
             outbox: this.options.outbox,
-            responder: this.options.interactionResponder
+            responder: this.options.interactionResponder,
+            serverClock: this.serverClock
           }),
-          interactionDeadline: () =>
-            new Date(
-              Math.min(Date.parse(command.leaseExpiresAt), Date.now() + interactionTimeoutMs)
-            ),
           lifecycleObserver: async (event) => {
             if (event.kind !== "session_ready") return;
             try {

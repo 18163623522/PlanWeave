@@ -76,6 +76,22 @@ describe("Agent Host connection-independent lease expiry", () => {
     expect(run.abortCount).toBe(1);
   });
 
+  it("keeps the execution signal active past its initial lease after renewal", async () => {
+    const harness = await setup();
+    const run = await harness.startExecution();
+    const renewLease = vi.spyOn(harness.state, "renewLease");
+    harness.send(renewal(3_000));
+    await vi.waitFor(() => expect(renewLease).toHaveReturnedWith(true));
+
+    harness.clock.advanceBy(1_500);
+    expect(run.context.signal.aborted).toBe(false);
+    expect(harness.state.executionEvidence(1)?.status).toBe("running");
+
+    harness.clock.advanceBy(1_500);
+    await vi.waitFor(() => expect(run.context.signal.aborted).toBe(true));
+    expectLeaseLost(harness);
+  });
+
   it.each([
     { leaseId: "wrong-lease" },
     { executionAttemptId: "wrong-attempt" }

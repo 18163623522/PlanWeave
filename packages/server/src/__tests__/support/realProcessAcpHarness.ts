@@ -116,6 +116,7 @@ export type RealProcessAcpHarnessOptions = {
   graceMs?: number;
   manifest?: PlanPackageManifest;
   serverLimits?: RealProcessServerLimits;
+  hostClockOffsetMs?: number;
 };
 
 export type SecondaryHostOptions = {
@@ -370,6 +371,7 @@ export class RealProcessAcpHarness {
   readonly hostCapabilities: readonly string[];
   readonly hostAgentProfileId: string;
   readonly graceMs: number;
+  readonly hostClockOffsetMs: number;
 
   private server: ManagedChild | undefined;
   private host: ManagedChild | undefined;
@@ -396,6 +398,7 @@ export class RealProcessAcpHarness {
     hostCapabilities: readonly string[];
     hostAgentProfileId: string;
     graceMs: number;
+    hostClockOffsetMs: number;
     ownedRoots: string[];
   }) {
     this.paths = init.paths;
@@ -410,6 +413,7 @@ export class RealProcessAcpHarness {
     this.hostCapabilities = init.hostCapabilities;
     this.hostAgentProfileId = init.hostAgentProfileId;
     this.graceMs = init.graceMs;
+    this.hostClockOffsetMs = init.hostClockOffsetMs;
     this.ownedRoots = init.ownedRoots;
     this.acpControl = new FakeAcpControl(init.paths.control);
   }
@@ -427,10 +431,21 @@ export class RealProcessAcpHarness {
       agentId: "codex"
     };
     const graceMs = options.graceMs ?? 500;
+    const hostClockOffsetMs = options.hostClockOffsetMs ?? 0;
+    if (!Number.isSafeInteger(hostClockOffsetMs)) {
+      throw new Error("real_process_harness_clock_offset_invalid");
+    }
 
     const workspace = await createTestWorkspace(options.manifest ?? remoteAcpManifest());
     const root = await mkdtemp(join(tmpdir(), "planweave-real-process-acp-"));
     const ownedRoots = [root, workspace.home, workspace.root];
+    if (hostClockOffsetMs !== 0) {
+      await writeFile(
+        join(root, "host-clock.cjs"),
+        `const RealDate = Date;\nconst offset = ${hostClockOffsetMs};\nclass ShiftedDate extends RealDate {\n  constructor(...args) {\n    if (args.length === 0) super(RealDate.now() + offset);\n    else super(...args);\n  }\n  static now() { return RealDate.now() + offset; }\n}\nglobal.Date = ShiftedDate;\n`,
+        "utf8"
+      );
+    }
 
     const paths: HarnessPaths = {
       root,
@@ -547,6 +562,7 @@ export class RealProcessAcpHarness {
       hostCapabilities,
       hostAgentProfileId: hostAgentProfile.id,
       graceMs,
+      hostClockOffsetMs,
       ownedRoots
     });
   }
@@ -655,6 +671,18 @@ export class RealProcessAcpHarness {
     this.logFlushTasks.add(flush);
     void flush.finally(() => this.logFlushTasks.delete(flush));
     return handle;
+  }
+
+  private hostLaunchArgs(): string[] {
+    return [
+      ...(this.hostClockOffsetMs === 0
+        ? []
+        : ["--require", join(this.paths.root, "host-clock.cjs")]),
+      agentHostBinPath,
+      "run",
+      "--config",
+      this.paths.hostConfig
+    ];
   }
 
   private async rebindEphemeralPort(): Promise<void> {
@@ -930,11 +958,7 @@ export class RealProcessAcpHarness {
     if (this.host?.tree.isAlive()) throw new Error("real_process_harness_host_already_running");
     this.host = undefined;
     if (!this.enrolled) await this.enrollHost();
-    this.host = this.spawnLongLived(
-      process.execPath,
-      [agentHostBinPath, "run", "--config", this.paths.hostConfig],
-      "host"
-    );
+    this.host = this.spawnLongLived(process.execPath, this.hostLaunchArgs(), "host");
     await this.waitForHostOnline();
   }
 
@@ -1115,11 +1139,7 @@ export class RealProcessAcpHarness {
       (await this.waitForHostOnline().catch(() => undefined))?.lastSeenAt;
     await this.stopHost("harness restartHost");
     // Credential remains in host dataDirectory; do not re-enroll.
-    this.host = this.spawnLongLived(
-      process.execPath,
-      [agentHostBinPath, "run", "--config", this.paths.hostConfig],
-      "host"
-    );
+    this.host = this.spawnLongLived(process.execPath, this.hostLaunchArgs(), "host");
     return this.waitForHostOnline(
       previousLastSeenAt ? { lastSeenAtNot: previousLastSeenAt } : undefined
     );

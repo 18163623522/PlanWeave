@@ -28,6 +28,7 @@ import {
   AgentHostSessionLoadError
 } from "../execution/agentHostExecutor.js";
 import { AGENT_HOST_RESUME_PROMPT, RemoteAcpExecutor } from "../execution/remoteAcpExecutor.js";
+import { CalibratedServerClock } from "../transport/calibratedServerClock.js";
 import {
   openAgentHostRemoteExecutionOutbox,
   type AgentHostSqliteRemoteExecutionOutbox
@@ -692,6 +693,116 @@ describe("RemoteAcpExecutor", () => {
         })
       ])
     );
+  });
+
+  it.each([
+    -600_000, 0, 600_000
+  ])("keeps local and Server interaction deadlines equivalent with %i ms clock offset", async (offsetMs) => {
+    const localNow = new Date();
+    const serverClock = new CalibratedServerClock();
+    serverClock.synchronize(new Date(localNow.getTime() + offsetMs).toISOString(), localNow);
+    const observed: Array<{
+      kind: "permission" | "elicitation";
+      deadline: Date;
+      remainingMs: number;
+    }> = [];
+    const recordedDeadlines: string[] = [];
+    const responder: AgentHostRemoteInteractionResponder = {
+      requestPermission: (_identity, request, context) => {
+        observed.push({
+          kind: "permission",
+          deadline: context.deadline,
+          remainingMs: context.deadline.getTime() - Date.now()
+        });
+        return { kind: "select", optionId: request.options[0]!.optionId };
+      },
+      requestElicitation: (_identity, _request, context) => {
+        observed.push({
+          kind: "elicitation",
+          deadline: context.deadline,
+          remainingMs: context.deadline.getTime() - Date.now()
+        });
+        return { action: "accept", content: { value: "exact response" } };
+      }
+    };
+    for (const scenario of ["permission", "elicitation"]) {
+      const { outbox } = await openOutbox();
+      const input = executeBlockCommandSchema.parse({
+        ...command({ prompt: finalArtifactPrompt }),
+        // The transport owns renewed lease validity; this command retains its initial expiry.
+        leaseExpiresAt: new Date(localNow.getTime() - 60_000).toISOString()
+      });
+      const executor = new RemoteAcpExecutor({
+        workspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+        runtimeWorkspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+        profileResolver: profileResolver(scenario),
+        outbox,
+        interactionResponder: responder,
+        hostCapabilities: ["linux", "acp.test"],
+        serverClock,
+        limits: { interactionTimeoutMs: 5_000 }
+      });
+      await expect(executor.execute(input, artifactContext(input).context)).resolves.toMatchObject({
+        reportArtifactRef: expect.stringMatching(/^artifact:sha256:/)
+      });
+      const request = outbox
+        .records(identity(input))
+        .find(
+          (record) => record.kind === "permission_request" || record.kind === "elicitation_request"
+        );
+      if (
+        !request ||
+        (request.kind !== "permission_request" && request.kind !== "elicitation_request")
+      ) {
+        throw new Error("interaction_request_missing");
+      }
+      recordedDeadlines.push(request.deadline);
+    }
+    expect(observed.map((item) => item.kind)).toEqual(["permission", "elicitation"]);
+    for (const item of observed) {
+      expect(item.remainingMs).toBeGreaterThan(0);
+      expect(item.remainingMs).toBeLessThanOrEqual(5_000);
+    }
+    for (const [index, deadline] of recordedDeadlines.entries()) {
+      const localDeadline = observed[index]!.deadline.getTime();
+      expect(Date.parse(deadline) - localDeadline).toBe(offsetMs);
+    }
+  });
+
+  it("does not extend a pending interaction when the Server clock is recalibrated", async () => {
+    const { outbox } = await openOutbox();
+    const input = command({ prompt: finalArtifactPrompt });
+    const serverClock = new CalibratedServerClock();
+    const executor = new RemoteAcpExecutor({
+      workspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+      runtimeWorkspaceResolver: { resolve: () => ({ cwd: process.cwd() }) },
+      profileResolver: profileResolver("permission"),
+      outbox,
+      interactionResponder: {
+        requestPermission: () => new Promise(() => undefined),
+        requestElicitation: () => ({ action: "cancel" })
+      },
+      hostCapabilities: ["linux", "acp.test"],
+      serverClock,
+      limits: { interactionTimeoutMs: 900 }
+    });
+    const run = executor.execute(input, artifactContext(input).context);
+    await vi.waitFor(() =>
+      expect(
+        outbox.records(identity(input)).some((record) => record.kind === "permission_request")
+      ).toBe(true)
+    );
+    const request = outbox
+      .records(identity(input))
+      .find((record) => record.kind === "permission_request");
+    if (!request || request.kind !== "permission_request")
+      throw new Error("permission_request_missing");
+    serverClock.synchronize(new Date(Date.now() + 600_000).toISOString());
+    serverClock.synchronize(new Date(Date.now() - 600_000).toISOString());
+    await expectFailure(run, "acp_interaction_timeout");
+    expect(
+      outbox.records(identity(input)).find((record) => record.kind === "permission_request")
+    ).toEqual(request);
   });
 
   it("maps dynamic session config failures to a bounded typed failure", async () => {
