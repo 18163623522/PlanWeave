@@ -39,7 +39,8 @@ describe("Agent Host connection status file", () => {
         state: "backing-off",
         attempt: 2,
         delayMs: 1_500,
-        retryAt: "2030-01-01T00:00:03.000Z"
+        retryAt: "2030-01-01T00:00:03.000Z",
+        reason: "upgrade_http_503"
       },
       new Date("2030-01-01T00:00:02.000Z")
     );
@@ -48,7 +49,8 @@ describe("Agent Host connection status file", () => {
         state: "backing-off",
         attempt: 2,
         delayMs: 1_500,
-        retryAt: "2030-01-01T00:00:03.000Z"
+        retryAt: "2030-01-01T00:00:03.000Z",
+        reason: "upgrade_http_503"
       }
     });
   });

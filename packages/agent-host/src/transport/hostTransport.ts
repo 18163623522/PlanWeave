@@ -8,6 +8,7 @@ export type HostTransportStatus =
       readonly attempt: number;
       readonly delayMs: number;
       readonly retryAt: string;
+      readonly reason?: string;
     }
   | { readonly state: "auth-failed"; readonly reason: string }
   | { readonly state: "stopped" };

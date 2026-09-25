@@ -1,9 +1,9 @@
 import { remoteRunnerEventServerCapabilitySchema } from "@planweave-ai/agent-host-protocol";
 import type { HostTransportClock } from "./hostTransport.js";
+import { classifyRemoteRunnerHttpFailure } from "./remoteRunnerHttpFailure.js";
+export { parseRemoteRunnerRetryAfter } from "./remoteRunnerHttpFailure.js";
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
-const MAX_RETRY_AFTER_MS = 30_000;
-const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRYABLE_NETWORK_CODES = new Set([
   "EAI_AGAIN",
   "ENOTFOUND",
@@ -62,18 +62,6 @@ export function selectRemoteRunnerEventProtocolVersion(capability: unknown): 2 {
     throw new RemoteRunnerDiscoveryError("protocol", "remote_runner_event_v2_required");
   }
   return 2;
-}
-
-export function parseRemoteRunnerRetryAfter(value: string | null, now: Date): number | undefined {
-  if (value === null) return undefined;
-  const text = value.trim();
-  if (/^\d+$/.test(text)) return Math.min(Number(text) * 1_000, MAX_RETRY_AFTER_MS);
-  const httpDate =
-    /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
-  if (!httpDate.test(text)) return undefined;
-  const timestamp = Date.parse(text);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toUTCString() !== text) return undefined;
-  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, timestamp - now.getTime()));
 }
 
 function classifyRequestFailure(error: unknown): RemoteRunnerDiscoveryError {
@@ -142,17 +130,12 @@ export async function discoverRemoteRunnerEventProtocol(options: {
       checkCancellation();
       if (!response.ok) {
         const code = `remote_runner_discovery_http_${response.status}`;
-        if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
-          const retryAfterMs =
-            response.status === 429 || response.status === 503
-              ? parseRemoteRunnerRetryAfter(response.headers.get("retry-after"), clock.now())
-              : undefined;
-          throw new RemoteRunnerDiscoveryError("retryable", code, retryAfterMs);
-        }
-        throw new RemoteRunnerDiscoveryError(
-          response.status === 401 || response.status === 403 ? "auth" : "protocol",
-          code
+        const failure = classifyRemoteRunnerHttpFailure(
+          response.status,
+          response.headers.get("retry-after"),
+          clock.now()
         );
+        throw new RemoteRunnerDiscoveryError(failure.kind, code, failure.retryAfterMs);
       }
       text = await response.text();
       checkCancellation();

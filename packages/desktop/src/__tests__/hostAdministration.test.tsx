@@ -1026,6 +1026,7 @@ describe("Agent Host settings", () => {
             attempt: 3,
             delayMs: 5_000,
             retryAt: "2030-01-01T00:00:05.000Z",
+            reason: "upgrade_http_503",
             updatedAt: "2030-01-01T00:00:00.000Z",
             serverOrigin: "https://server.example"
           },
@@ -1048,7 +1049,7 @@ describe("Agent Host settings", () => {
     );
 
     expect(screen.getByTestId("host-admin-local-server-connection")).toHaveTextContent(
-      "Server connection: Reconnecting"
+      "Server connection: Reconnecting · upgrade_http_503"
     );
     expect(screen.getByTestId("host-admin-local-server-origin")).toHaveTextContent(
       "https://server.example"

@@ -22,7 +22,8 @@ const hostConnectionTransportSchema = z.discriminatedUnion("state", [
       state: z.literal("backing-off"),
       attempt: z.number().int().positive(),
       delayMs: z.number().int().nonnegative(),
-      retryAt: z.string().datetime()
+      retryAt: z.string().datetime(),
+      reason: z.string().min(1).max(256).optional()
     })
     .strict(),
   z.object({ state: z.literal("auth-failed"), reason: z.string().min(1).max(256) }).strict(),
@@ -60,7 +61,8 @@ export function serializeHostTransportStatus(
         state: "backing-off",
         attempt: status.attempt,
         delayMs: status.delayMs,
-        retryAt: status.retryAt
+        retryAt: status.retryAt,
+        ...(status.reason ? { reason: status.reason.slice(0, 256) } : {})
       };
     case "auth-failed":
       return { state: "auth-failed", reason: status.reason.slice(0, 256) };

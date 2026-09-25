@@ -194,7 +194,8 @@ async function resolveServerConnection(
           state: "backing-off",
           attempt: document.transport.attempt,
           delayMs: document.transport.delayMs,
-          retryAt: document.transport.retryAt
+          retryAt: document.transport.retryAt,
+          ...(document.transport.reason ? { reason: document.transport.reason } : {})
         };
       case "degraded":
         return {

@@ -1,4 +1,5 @@
 import { HostConnectionWatchdog } from "./hostConnectionWatchdog.js";
+import { classifyRemoteRunnerHttpFailure } from "./remoteRunnerHttpFailure.js";
 import type { RemoteAcpConversationService } from "../execution/remoteAcpConversationService.js";
 import { WebSocket } from "ws";
 import {
@@ -308,7 +309,8 @@ export class AgentHostClient implements HostTransport {
           state: "backing-off",
           attempt,
           delayMs,
-          retryAt: new Date(this.clock.now().getTime() + delayMs).toISOString()
+          retryAt: new Date(this.clock.now().getTime() + delayMs).toISOString(),
+          reason: error.code
         });
         if (!this.isCurrentLifecycle(generation, controller)) return;
         const timer = this.clock.setTimeout(() => {
@@ -452,6 +454,7 @@ export class AgentHostClient implements HostTransport {
       ca: this.options.ca
     });
     this.socket = socket;
+    let upgradeFailure: { reason: string; retryAfterMs?: number } | undefined;
     const watchdog = new HostConnectionWatchdog(this.clock, () => {
       if (this.socket !== socket || this.stopped) return;
       this.options.logger?.log({
@@ -515,13 +518,24 @@ export class AgentHostClient implements HostTransport {
         .finally(() => this.queuedMessages--);
     });
     socket.on("unexpected-response", (_request, response) => {
+      response.resume();
       if (this.socket !== socket || this.stopped) return;
-      if (response.statusCode === 401 || response.statusCode === 403) {
+      const failure = classifyRemoteRunnerHttpFailure(
+        response.statusCode ?? 0,
+        response.headers["retry-after"]?.toString() ?? null,
+        this.clock.now()
+      );
+      if (failure.kind === "auth") {
         this.stopped = true;
         this.transition({ state: "auth-failed", reason: "credential_rejected" });
-      } else {
+      } else if (failure.kind === "protocol") {
         this.stopped = true;
-        this.transition({ state: "degraded", reason: "upgrade_rejected" });
+        this.transition({ state: "degraded", reason: `upgrade_http_${response.statusCode ?? 0}` });
+      } else {
+        upgradeFailure = {
+          reason: `upgrade_http_${response.statusCode}`,
+          retryAfterMs: failure.retryAfterMs
+        };
       }
       socket.terminate();
     });
@@ -541,13 +555,20 @@ export class AgentHostClient implements HostTransport {
       }
       if (!this.stopped) {
         const attempt = ++this.reconnectAttempt;
-        const delayMs = reconnectDelay(attempt, this.options.random ?? Math.random, this.reconnect);
+        const delayMs = Math.min(
+          30_000,
+          Math.max(
+            reconnectDelay(attempt, this.options.random ?? Math.random, this.reconnect),
+            upgradeFailure?.retryAfterMs ?? 0
+          )
+        );
         const generation = this.lifecycleGeneration;
         this.transition({
           state: "backing-off",
           attempt,
           delayMs,
-          retryAt: new Date(this.clock.now().getTime() + delayMs).toISOString()
+          retryAt: new Date(this.clock.now().getTime() + delayMs).toISOString(),
+          ...(upgradeFailure ? { reason: upgradeFailure.reason } : {})
         });
         if (this.stopped || this.lifecycleGeneration !== generation) return;
         const timer = this.clock.setTimeout(() => {

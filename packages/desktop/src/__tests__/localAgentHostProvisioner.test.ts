@@ -715,6 +715,16 @@ describe("Desktop local Agent Host provisioner", () => {
         serverOrigin: "https://mac-server.example"
       }
     });
+    await writeHostConnectionStatus(paths.dataDirectory, {
+      state: "backing-off",
+      attempt: 1,
+      delayMs: 2_000,
+      retryAt: "2030-01-01T00:00:13.000Z",
+      reason: "upgrade_http_503"
+    });
+    await expect(provisioner.status("profile-a")).resolves.toMatchObject({
+      serverConnection: { state: "backing-off", reason: "upgrade_http_503" }
+    });
   });
 
   it("forces Server connection offline when the background process is not running", async () => {
