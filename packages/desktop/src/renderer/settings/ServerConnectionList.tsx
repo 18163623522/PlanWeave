@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EllipsisIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +31,9 @@ export function ServerConnectionList({
   const [servers, setServers] = useState<RememberedServerConnectionView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
+  const pendingOrigins = useRef(new Set<string>());
+  const [busyOrigins, setBusyOrigins] = useState<ReadonlySet<string>>(new Set());
+  const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [epoch, setEpoch] = useState(0);
   const [checks, setChecks] = useState<Record<string, string>>({});
@@ -68,6 +70,8 @@ export function ServerConnectionList({
   ) => {
     const api = collaborationBridge;
     if (!api) return;
+    const origin = new URL(server.serverBaseUrl).origin;
+    if (pendingOrigins.current.has(origin)) return;
     if (
       action === "forget" &&
       !window.confirm(
@@ -81,8 +85,13 @@ export function ServerConnectionList({
       status.workspaceConnection.status === "connected"
     )
       return;
-    setBusy(server.profileId);
-    setError(null);
+    pendingOrigins.current.add(origin);
+    setBusyOrigins(new Set(pendingOrigins.current));
+    setOperationErrors((current) => {
+      const next = { ...current };
+      delete next[origin];
+      return next;
+    });
     try {
       if (action === "connect")
         await api.selectWorkspaceConnection({ profileId: server.profileId });
@@ -107,12 +116,18 @@ export function ServerConnectionList({
         } as const;
         setChecks((current) => ({ ...current, [server.profileId]: t(keys[result.status]) }));
       }
-      await refresh();
-      setEpoch((value) => value + 1);
+      if (action !== "check") {
+        await refresh();
+        setEpoch((value) => value + 1);
+      }
     } catch (cause) {
-      setError(collaborationConnectionErrorMessage(t, cause));
+      setOperationErrors((current) => ({
+        ...current,
+        [origin]: collaborationConnectionErrorMessage(t, cause)
+      }));
     } finally {
-      setBusy(null);
+      pendingOrigins.current.delete(origin);
+      setBusyOrigins(new Set(pendingOrigins.current));
     }
   };
   return (
@@ -142,6 +157,7 @@ export function ServerConnectionList({
             );
             const connecting = active && status?.workspaceConnection.status === "connecting";
             const connected = active && status?.workspaceConnection.status === "connected";
+            const rowBusy = busyOrigins.has(group.origin);
             return (
               <ServerManagementAuthorization
                 key={group.origin}
@@ -203,7 +219,7 @@ export function ServerConnectionList({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={busy !== null}
+                        disabled={rowBusy}
                         onClick={() => {
                           if (!connected && group.connections.length > 1) setOpenMenu(group.origin);
                           else void operate(server, connected ? "check" : "connect");
@@ -220,7 +236,7 @@ export function ServerConnectionList({
                             size="icon-sm"
                             variant="ghost"
                             aria-label={`${t("managementActions")}: ${new URL(group.origin).host}`}
-                            disabled={busy !== null}
+                            disabled={rowBusy}
                           >
                             <EllipsisIcon className="size-4" />
                           </Button>
@@ -240,9 +256,7 @@ export function ServerConnectionList({
                               <DropdownMenuItem
                                 key={connection.profileId}
                                 className="items-start px-3 py-2.5"
-                                disabled={
-                                  busy !== null || current || !connection.hasDeviceCredential
-                                }
+                                disabled={rowBusy || current || !connection.hasDeviceCredential}
                                 onSelect={() => void operate(connection, "connect")}
                               >
                                 <div className="min-w-0 flex-1">
@@ -267,7 +281,7 @@ export function ServerConnectionList({
                           })}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            disabled={busy !== null}
+                            disabled={rowBusy}
                             variant="destructive"
                             className="px-3 py-2.5"
                             onSelect={() => void operate(server, "forget")}
@@ -288,6 +302,11 @@ export function ServerConnectionList({
                     {checks[server.profileId] ? (
                       <p role="status" className="col-span-5 text-xs text-text-muted">
                         {t("deploymentConnectivity")}: {checks[server.profileId]}
+                      </p>
+                    ) : null}
+                    {operationErrors[group.origin] ? (
+                      <p role="alert" className="col-span-5 text-xs text-destructive">
+                        {operationErrors[group.origin]}
                       </p>
                     ) : null}
                   </div>

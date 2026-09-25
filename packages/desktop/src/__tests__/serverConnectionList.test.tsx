@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   selectWorkspaceConnection: vi.fn().mockResolvedValue(undefined),
   validateDeploymentConnectivity: vi.fn().mockResolvedValue({ status: "reachable" })
 }));
+const statusApi = vi.hoisted(() => ({ refresh: vi.fn().mockResolvedValue(undefined) }));
 let connection = activeWorkspaceConnectionViewSchema.parse({
   schemaVersion: "workspace-setup/v1",
   status: "connected",
@@ -47,12 +48,13 @@ vi.mock("../renderer/bridge", () => ({ collaborationBridge: api, operatorControl
 vi.mock("../renderer/hooks/useCollaborationStatus", () => ({
   useCollaborationStatus: () => ({
     status: { workspaceConnection: connection },
-    refresh: async () => undefined
+    refresh: statusApi.refresh
   })
 }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  statusApi.refresh.mockResolvedValue(undefined);
 });
 function fixture(status: "connected" | "disconnected" = "connected") {
   connection = { ...connection, status };
@@ -177,6 +179,56 @@ function remembered(profileId: string) {
     hasDeviceCredential: true
   };
 }
+
+it("keeps B's connectivity check and actions usable while A's connection is pending", async () => {
+  const originalConnection = connection;
+  connection = {
+    ...connection,
+    status: "connected",
+    profile: {
+      ...connection.profile!,
+      profileId: "beta",
+      serverBaseUrl: "https://beta.example/"
+    }
+  };
+  api.listRememberedServerConnections.mockResolvedValue([remembered("alpha"), remembered("beta")]);
+  let finishA!: () => void;
+  let failA!: (error: unknown) => void;
+  api.selectWorkspaceConnection.mockReturnValueOnce(
+    new Promise<void>((resolve, reject) => {
+      finishA = resolve;
+      failA = reject;
+    })
+  );
+  statusApi.refresh.mockReturnValue(new Promise(() => undefined));
+  try {
+    render(<ServerConnectionList refreshKey={0} t={createTranslator("en")} />);
+    const rows = await screen.findAllByTestId("server-connection-row");
+    await userEvent.click(within(rows[0]).getByRole("button", { name: "Connect" }));
+    expect(api.selectWorkspaceConnection).toHaveBeenCalledWith({ profileId: "alpha" });
+    expect(within(rows[0]).getByRole("button", { name: "Connect" })).toBeDisabled();
+    expect(within(rows[0]).getByRole("button", { name: /More actions/ })).toBeDisabled();
+    expect(within(rows[1]).getByRole("button", { name: "Check connectivity" })).toBeEnabled();
+    expect(within(rows[1]).getByRole("button", { name: /More actions/ })).toBeEnabled();
+    await userEvent.click(within(rows[1]).getByRole("button", { name: "Check connectivity" }));
+    await waitFor(() => expect(api.validateDeploymentConnectivity).toHaveBeenCalledOnce());
+    expect(within(rows[1]).getByText("Connectivity: Reachable")).toBeVisible();
+    await userEvent.click(within(rows[1]).getByRole("button", { name: /More actions/ }));
+    expect(await screen.findByRole("menu")).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await act(async () => failA(new Error("The configured Server could not be reached.")));
+    expect(within(rows[0]).getByRole("alert")).toHaveTextContent(
+      createTranslator("en")("peopleServerUnreachable")
+    );
+    expect(within(rows[1]).queryByRole("alert")).not.toBeInTheDocument();
+    await userEvent.click(within(rows[1]).getByRole("button", { name: "Check connectivity" }));
+    await waitFor(() => expect(api.validateDeploymentConnectivity).toHaveBeenCalledTimes(2));
+    expect(within(rows[0]).getByRole("alert")).toBeVisible();
+  } finally {
+    await act(async () => finishA());
+    connection = originalConnection;
+  }
+});
 
 it.each([1, 5, 20])("reads one full operator status for %i Server rows", async (count) => {
   const listeners = new Set<(status: unknown) => void>();
