@@ -208,6 +208,7 @@
         "rememberedServerGroups.test.ts",
         "serverConnectionList.test.tsx",
         "serverManagementAuthorization.test.tsx",
+        "serverManagementSnapshotRecovery.test.tsx",
         "executorServerSelector.test.tsx",
         "remoteAcpContinuation.test.tsx",
         "remoteAcpReconciliation.test.tsx",

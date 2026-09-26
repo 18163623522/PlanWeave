@@ -221,7 +221,11 @@ export function useServerManagementAuthorization(
               : await operatorControlBridge.reauthorizeManagement({ profileId: target.profileId });
         if (!stillTarget()) return false;
         const refreshed = await operatorStatus.refresh();
-        if (!refreshed.ok && authorityKey(current(), serverOrigin) === actionAuthorityKey) {
+        if (
+          !refreshed.ok &&
+          refreshed.error !== "operator_status_superseded" &&
+          authorityKey(current(), serverOrigin) === actionAuthorityKey
+        ) {
           if (stillTarget())
             setError({ generation: authority.current.generation, value: refreshed.error });
           return false;
@@ -283,9 +287,29 @@ export function useServerManagementAuthorization(
     error,
     verifiedId,
     refresh: () => {
-      setError(null);
-      setVerified(null);
-      refreshCheck.current?.();
+      const conflicted = Boolean(
+        (profileId && operatorStatus.conflictErrors[profileId]) ||
+          operatorStatus.conflictOrigins[serverOrigin]
+      );
+      if (!conflicted) {
+        setError(null);
+        setVerified(null);
+        refreshCheck.current?.();
+        return;
+      }
+      void (async () => {
+        const result = await operatorStatus.refresh();
+        if (!mounted.current) return;
+        if (!result.ok) {
+          setError({ generation: authority.current.generation, value: result.error });
+          return;
+        }
+        const generationBefore = authority.current.generation;
+        syncAuthority();
+        setError(null);
+        setVerified(null);
+        if (authority.current.generation === generationBefore) refreshCheck.current?.();
+      })();
     },
     importCredential: () => run("import"),
     reauthorize: () => run("reauthorize"),
