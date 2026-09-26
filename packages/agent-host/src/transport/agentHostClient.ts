@@ -625,11 +625,11 @@ export class AgentHostClient implements HostTransport {
       case "mailbox.permission_history":
         if (!this.historicalPermissionReplaySupported)
           throw new Error("historical_permission_replay_unsupported");
-        this.options.state.receive(event);
+        this.options.state.receive(event, this.serverClock.now());
         this.pump();
         return;
       case "mailbox.message":
-        this.options.state.receive(event);
+        this.options.state.receive(event, this.serverClock.now());
         if (
           event.command.type === "acp_conversation.prompt" ||
           event.command.type === "acp_conversation.cancel" ||

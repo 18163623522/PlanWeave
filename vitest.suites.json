@@ -770,6 +770,7 @@
         "agentHostCli.test.ts",
         "agentHostClient.test.ts",
         "agentHostConnectionLiveness.test.ts",
+        "agentHostInteractionClock.test.ts",
         "agentHostUpgradeRetry.test.ts",
         "agentHostClientAdversarial.test.ts",
         "agentHostClientLoad.test.ts",

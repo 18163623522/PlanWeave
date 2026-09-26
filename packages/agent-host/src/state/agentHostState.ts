@@ -143,7 +143,7 @@ export class AgentHostState implements AgentHostStateRepository {
     this.database.close();
   }
 
-  receive(input: ServerEvent): { stored: boolean; acknowledgement: HostEvent } {
+  receive(input: ServerEvent, deadlineNow?: Date): { stored: boolean; acknowledgement: HostEvent } {
     const event = messageEvent(input);
     switch (event.command.type) {
       case "execute_block":
@@ -265,7 +265,11 @@ export class AgentHostState implements AgentHostStateRepository {
             event.command.type === "interaction.elicitation_response" ||
             event.command.type === "interaction.authentication_action")
         ) {
-          this.interactions.settle(event.command, receivedAt);
+          const settledAt = deadlineNow ?? new Date();
+          if (Number.isNaN(settledAt.getTime())) {
+            throw new Error("agent_host_deadline_clock_invalid");
+          }
+          this.interactions.settle(event.command, settledAt.toISOString());
           this.database
             .prepare("UPDATE agent_host_inbox SET processed_at=? WHERE sequence=?")
             .run(receivedAt, event.sequence);
