@@ -110,7 +110,9 @@ describe("Task Workspace run pagination and selected record projection", () => {
     await waitFor(() => expect(api.getTaskWorkspaceRunDetail).toHaveBeenCalledTimes(4), {
       timeout: 4_000
     });
-    await waitFor(() => expect(result.current.selectedRecord).toBeNull());
+    await waitFor(() => expect(result.current.recordError).toBe("Temporary detail read failure"));
+    expect(result.current.selectedRecord?.recordId).toBe(recordId);
+    expect(result.current.selectedRecord?.finishedAt).toBeNull();
 
     phase = "terminal";
     await waitFor(() => expect(api.getTaskWorkspaceRunDetail).toHaveBeenCalledTimes(5), {

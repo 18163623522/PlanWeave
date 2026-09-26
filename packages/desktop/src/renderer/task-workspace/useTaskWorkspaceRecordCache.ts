@@ -138,11 +138,20 @@ export class TaskWorkspaceRecordCache {
     const pending = this.#pending.get(cacheKey);
     if (pending && pending.freshnessKey !== freshnessKey) this.#pending.delete(cacheKey);
     if (!cached) return null;
-    if (cached.freshnessKey !== freshnessKey) {
-      this.#records.delete(cacheKey);
-      return null;
-    }
+    // A newer freshness must refetch. Keep the previous ready detail until that read settles.
+    if (cached.freshnessKey !== freshnessKey) return null;
     touch(this.#records, cacheKey, cached);
+    return cached.load;
+  }
+
+  retainedReadyRecord(
+    authorityKey: string,
+    blockRef: string,
+    recordId: string
+  ): TaskWorkspaceRecordLoad | null {
+    if (authorityKey !== this.#authorityKey) return null;
+    const cached = this.#records.get(recordSelectionKey(authorityKey, blockRef, recordId));
+    if (!cached || cached.load.status !== "ready" || cached.load.record === null) return null;
     return cached.load;
   }
 
@@ -284,13 +293,16 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
       onRecordReadyRef.current(cached);
       return;
     }
-    setRecordLoad({
-      ...idleTaskWorkspaceRecordLoad,
-      authorityKey,
-      blockRef: identity.blockRef,
-      key: identity.recordId,
-      status: "loading"
-    });
+    const retained = cache.retainedReadyRecord(authorityKey, identity.blockRef, identity.recordId);
+    if (!retained) {
+      setRecordLoad({
+        ...idleTaskWorkspaceRecordLoad,
+        authorityKey,
+        blockRef: identity.blockRef,
+        key: identity.recordId,
+        status: "loading"
+      });
+    }
     const runDetailInput: TaskWorkspaceRunDetailInput = {
       canvasId: identity.canvasId,
       projectRoot: identity.projectRoot,
@@ -318,14 +330,23 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
           `${selectionKey}\u0000${freshnessKey}` !== activeSelectionKey.current
         )
           return;
-        setRecordLoad({
-          ...idleTaskWorkspaceRecordLoad,
+        const retained = cache.retainedReadyRecord(
           authorityKey,
-          blockRef: identity.blockRef,
-          error: errorMessage(error),
-          key: identity.recordId,
-          status: "error"
-        });
+          identity.blockRef,
+          identity.recordId
+        );
+        setRecordLoad(
+          retained
+            ? { ...retained, error: errorMessage(error), status: "error" }
+            : {
+                ...idleTaskWorkspaceRecordLoad,
+                authorityKey,
+                blockRef: identity.blockRef,
+                error: errorMessage(error),
+                key: identity.recordId,
+                status: "error"
+              }
+        );
       });
   }, [
     api,
@@ -359,7 +380,16 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
     recordLoadState.load.blockRef === identity.blockRef &&
     recordLoadState.load.key === identity.recordId
       ? recordLoadState.load
-      : idleTaskWorkspaceRecordLoad;
-  const visibleRecordLoad = syntheticLoad ?? cachedRecordLoad ?? currentRecordLoad;
+      : null;
+  const retainedRecordLoad =
+    enabled && identity && !syntheticLoad && !cachedRecordLoad && !currentRecordLoad
+      ? cache.retainedReadyRecord(authorityKey, identity.blockRef, identity.recordId)
+      : null;
+  const visibleRecordLoad =
+    syntheticLoad ??
+    cachedRecordLoad ??
+    currentRecordLoad ??
+    retainedRecordLoad ??
+    idleTaskWorkspaceRecordLoad;
   return { getRunScrollTop, onRunScrollTopChange, recordLoad: visibleRecordLoad };
 }

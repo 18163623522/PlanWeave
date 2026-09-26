@@ -4,10 +4,12 @@ import { SafeMarkdown } from "../../inspector/SafeMarkdown";
 
 export function TaskWorkspaceSubmittedReport({
   record,
+  recordError = null,
   submittedAt,
   t
 }: {
   record: DesktopRunRecord;
+  recordError?: string | null;
   submittedAt: string;
   t: ReturnType<typeof createTranslator>;
 }) {
@@ -18,6 +20,11 @@ export function TaskWorkspaceSubmittedReport({
       data-record-id={record.recordId}
       data-record-ready="true"
     >
+      {recordError ? (
+        <p className="max-w-xl text-sm text-destructive" role="alert">
+          {recordError}
+        </p>
+      ) : null}
       <header className="text-sm">
         <p className="font-medium">{t("taskWorkspaceReportSubmitted")}</p>
         <time dateTime={submittedAt}>{new Date(submittedAt).toLocaleString()}</time>

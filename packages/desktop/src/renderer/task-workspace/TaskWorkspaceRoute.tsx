@@ -272,7 +272,7 @@ export function TaskWorkspaceRoute({
       selectedAgentEndpointIdForTask={controller.selectedAgentEndpointIdForTask}
       workspace={controller.workspace}
     />
-  ) : controller.recordError ? (
+  ) : controller.recordError && !controller.selectedRecord ? (
     <SlotError title={labels.conversation} message={controller.recordError} />
   ) : (
     (slots.conversation?.(conversationProps) ?? (

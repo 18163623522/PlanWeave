@@ -21,11 +21,13 @@ export function TaskWorkspaceCliRun({
   api = bridge,
   canvasRef,
   record,
+  recordError = null,
   t
 }: {
   api?: Partial<TerminalApi> | null;
   canvasRef: DesktopCanvasReference;
   record: DesktopRunRecord;
+  recordError?: string | null;
   t: ReturnType<typeof createTranslator>;
 }) {
   const [apps, setApps] = useState<DesktopTerminalAppDetection[]>([]);
@@ -81,6 +83,11 @@ export function TaskWorkspaceCliRun({
       data-run-id={record.runId}
       data-testid="task-workspace-cli-run"
     >
+      {recordError ? (
+        <p className="max-w-xl text-sm text-destructive" role="alert">
+          {recordError}
+        </p>
+      ) : null}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Badge variant="outline">CLI</Badge>

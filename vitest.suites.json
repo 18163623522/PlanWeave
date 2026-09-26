@@ -259,6 +259,7 @@
         "taskWorkspaceNavigation.test.ts",
         "taskWorkspacePromptEditing.test.tsx",
         "taskWorkspaceRecordCache.test.ts",
+        "taskWorkspaceRecordRefresh.test.tsx",
         "taskWorkspaceRenderBenchmark.test.ts",
         "taskWorkspaceRepositoryActions.test.tsx",
         "taskWorkspaceRouteWiring.test.tsx",

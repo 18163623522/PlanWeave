@@ -93,13 +93,22 @@ export function TaskWorkspaceConversation(
     return (
       <TaskWorkspaceSubmittedReport
         record={selectedRecord}
+        recordError={props.recordError}
         submittedAt={selectedRun.item.run.metadata.submittedAt}
         t={t}
       />
     );
   }
   if (runnerKind === "cli") {
-    return <TaskWorkspaceCliRun api={api} canvasRef={canvasRef} record={selectedRecord} t={t} />;
+    return (
+      <TaskWorkspaceCliRun
+        api={api}
+        canvasRef={canvasRef}
+        record={selectedRecord}
+        recordError={props.recordError}
+        t={t}
+      />
+    );
   }
   if (runnerKind !== "acp") {
     return (
@@ -256,6 +265,14 @@ function AcpRunConversation({
           sessionIdentity={selectedRun.item.run.capabilities.cancel.identity}
           t={t}
         />
+        {props.recordError ? (
+          <p
+            className="mt-3 rounded-md border border-destructive/40 p-3 text-sm text-destructive"
+            role="alert"
+          >
+            {props.recordError}
+          </p>
+        ) : null}
         {props.subscriptionError ? (
           <p
             className="mt-3 rounded-md border border-destructive/40 p-3 text-sm text-destructive"
