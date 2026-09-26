@@ -187,8 +187,20 @@ export class HumanRemoteControlService {
   ) {
     const operation = this.operationFor(scope, operationId);
     const dispatch = this.options.dispatches.get(operation.dispatchId);
+    const persisted = projectPersistedRemoteOperationRuntime(operation, dispatch !== undefined);
+    // An interrupted attempt is already durable. Do not ask the Host's Runtime,
+    // which is offline after lease loss, before the observation can be returned.
+    const interrupted =
+      operation.state === "interrupted"
+        ? projectRemoteOperationRuntime({
+            ref: operation.blockRef,
+            status: "interrupted",
+            ...(dispatch?.interruption ? { interruption: dispatch.interruption } : {})
+          })
+        : undefined;
     const runtime = projectRemoteOperationRuntime(
-      projectPersistedRemoteOperationRuntime(operation, dispatch !== undefined) ??
+      persisted ??
+        interrupted ??
         dispatchedRuntime ??
         (await this.options.coordinator.query(operation.id))
     );

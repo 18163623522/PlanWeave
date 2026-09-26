@@ -4,6 +4,7 @@ import {
   workspaceIdSchema
 } from "@planweave-ai/collaboration-protocol/core/primitives";
 import { HumanRemoteControlService } from "../humanRemoteControlService.js";
+import { endpointDispatchRequest } from "./support/endpointCoordinatorFixture.js";
 import { setup } from "./support/remoteBlockCoordinatorFixture.js";
 
 describe("Human observation before remote dispatch", () => {
@@ -104,5 +105,84 @@ describe("Human observation before remote dispatch", () => {
     }
     await fixture.coordinator.executeHumanAction(action);
     expect(fixture.dispatches.get(operation.dispatchId)).toBeUndefined();
+  });
+
+  it("observes an interrupted dispatch without asking an offline Runtime", async () => {
+    const fixture = await setup(true);
+    if (!fixture.host) throw new Error("expected_test_host");
+    const outcome = await fixture.coordinator.dispatch(
+      endpointDispatchRequest({
+        agentEndpoints: fixture.agentEndpoints,
+        locator: fixture.dispatchLocator,
+        blockRef: "T-001#B-001",
+        idempotencyKey: "observe-interrupted-offline-runtime"
+      })
+    );
+    const operation = fixture.operations.getRequired(outcome.operation.id);
+    const dispatch = fixture.dispatches.getRequired(operation.dispatchId);
+    fixture.dispatches.accept(
+      fixture.host.id,
+      "observe-interrupted-accepted",
+      dispatch.id,
+      dispatch.leaseId,
+      dispatch.executionAttemptId
+    );
+    fixture.dispatches.interrupt(fixture.host.id, "observe-interrupted", {
+      type: "dispatch.interrupted",
+      protocolVersion: 1,
+      messageId: "observe-interrupted",
+      dispatchId: dispatch.id,
+      leaseId: dispatch.leaseId,
+      executionAttemptId: dispatch.executionAttemptId,
+      reason: "lease_lost",
+      resumable: true,
+      recovery: { acpSessionId: "session-observe", recoveryId: "recovery-observe" }
+    });
+    const reservation = fixture.reservations.getRequired(dispatch.leaseId);
+    fixture.reservations.release({
+      leaseId: reservation.leaseId,
+      fencingToken: reservation.fencingToken,
+      expectedVersion: reservation.version,
+      reason: "expired"
+    });
+    await fixture.coordinator.reenter(operation.id);
+    const query = vi
+      .spyOn(fixture.coordinator, "query")
+      .mockRejectedValue(new Error("canvas_runtime_unavailable"));
+    const service = new HumanRemoteControlService({
+      operations: fixture.operations,
+      dispatches: fixture.dispatches,
+      coordinator: fixture.coordinator,
+      events: fixture.acpEvents,
+      interactions: fixture.interactions
+    });
+    const workspaceId = workspaceIdSchema.parse(fixture.locator.workspaceId);
+    const observation = await service.lookupLatestOperation(
+      {
+        workspaceId,
+        projectId: fixture.locator.projectId,
+        actor: {
+          kind: "workspace_device",
+          workspaceId,
+          projectId: fixture.locator.projectId,
+          deviceSessionId: deviceSessionIdSchema.parse("device-session-test"),
+          humanPrincipalId: "human-test",
+          displayName: "Test member"
+        }
+      },
+      { canvasId: fixture.locator.canvasId, blockRef: operation.blockRef }
+    );
+    expect(query).not.toHaveBeenCalled();
+    expect(observation).toMatchObject({
+      state: "interrupted",
+      runtime: {
+        status: "interrupted",
+        interruption: {
+          reason: "lease_lost",
+          resumable: true,
+          recovery: { acpSessionId: "session-observe", recoveryId: "recovery-observe" }
+        }
+      }
+    });
   });
 });
