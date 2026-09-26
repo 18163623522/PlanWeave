@@ -558,6 +558,70 @@ describe("Workspace execution process boundary", () => {
     unmount();
   });
 
+  it("shows an interrupted operation as interrupted while an old interaction event remains", async () => {
+    const blockRef = "T-001#B-001";
+    const operationId = "operation-1";
+    const base = {
+      version: "planweave.execution-event/v1" as const,
+      runSessionId: "SESSION-0001",
+      scope: { kind: "block" as const, blockRef },
+      source: { target: "remote" as const, operationId, executionAttemptId: "attempt-1", cursor: 1 }
+    };
+    const view = coordinatorView(operationId, blockRef, [
+      {
+        ...base,
+        eventId: "interaction-1",
+        type: "interaction_required",
+        observedAt: "2026-08-30T00:00:01.000Z",
+        data: {
+          type: "interaction.authentication_required",
+          dispatchId: "dispatch-1",
+          leaseId: "lease-1",
+          executionAttemptId: "attempt-1",
+          acpSessionId: "acp-1",
+          actionId: "action-1",
+          expiresAt: "2030-01-01T00:05:00.000Z",
+          agentProfileId: "codex-acp",
+          hostInstruction: "Login required"
+        }
+      },
+      {
+        ...base,
+        eventId: "operation-2",
+        type: "operation_observed",
+        observedAt: "2026-08-30T00:00:02.000Z",
+        source: { ...base.source, cursor: 2 },
+        data: { state: "interrupted", attemptStatus: "interrupted", operationRevision: 2 }
+      }
+    ]);
+    const api = {
+      startWorkspaceExecution: vi.fn(),
+      followWorkspaceExecution: vi.fn(async () => view),
+      respondWorkspaceExecution: vi.fn(),
+      cancelWorkspaceExecution: vi.fn()
+    };
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceExecutionTaskWorkspaceConversation({
+        api,
+        locator: {
+          kind: "workspace",
+          connectionProfileId: "profile-1",
+          workspaceId: "workspace-1",
+          projectId: "project-1",
+          canvasId: "canvas-1"
+        },
+        blockRef,
+        operationId,
+        scopeKey: "scope-1",
+        onTerminal: vi.fn()
+      })
+    );
+
+    await vi.waitFor(() => expect(result.current?.state).toBe("interrupted"));
+    expect(result.current?.state).not.toBe("action_required");
+    unmount();
+  });
+
   it("retains canonical events across empty incremental follow pages", async () => {
     vi.useFakeTimers();
     try {

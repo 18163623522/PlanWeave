@@ -17,6 +17,14 @@ import {
   workspaceExecutionSuccessPollDelay
 } from "./workspaceExecutionPollingCadence";
 
+function latestObservedOperationState(events: readonly WorkspaceExecutionEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type === "operation_observed") return event.data.state;
+  }
+  return null;
+}
+
 function conversationState(phase: string): RemoteTaskWorkspaceConversation["state"] {
   if (phase === "completed") return "completed";
   if (phase === "failed") return "failed";
@@ -186,7 +194,9 @@ export function useWorkspaceExecutionTaskWorkspaceConversation(input: {
         transientFailures = 0;
         if (view.handle.target === "remote") cache.evidenceCursor = view.handle.cursor;
         for (const event of view.events) cache.events.set(event.eventId, event);
-        const timeline = projectWorkspaceExecutionTimeline([...cache.events.values()]);
+        const observedEvents = [...cache.events.values()];
+        const timeline = projectWorkspaceExecutionTimeline(observedEvents);
+        const observedState = latestObservedOperationState(observedEvents);
         const nextProgressFingerprint = progressFingerprint(view, timeline);
         if (
           lastProgressFingerprint === null ||
@@ -198,9 +208,11 @@ export function useWorkspaceExecutionTaskWorkspaceConversation(input: {
           noProgressCount += 1;
         }
         const state =
-          timeline.pendingInteractions.length > 0
-            ? "action_required"
-            : conversationState(view.session.phase);
+          observedState === "interrupted"
+            ? "interrupted"
+            : timeline.pendingInteractions.length > 0
+              ? "action_required"
+              : conversationState(view.session.phase);
         cache.value = {
           blockRef,
           cursor: timeline.cursor,

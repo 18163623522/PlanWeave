@@ -23,7 +23,7 @@ export function RemoteAcpExecutionControls({
           key={item.request.actionId}
           item={item}
           t={t}
-          disabled={continuation.sending}
+          disabled={continuation.sending || continuation.execution?.state === "interrupted"}
           cancelExecution={
             continuation.execution?.cancel ? () => void continuation.cancelExecution() : null
           }
