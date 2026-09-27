@@ -77,6 +77,7 @@ async function writeBlockRun(options: {
   finishedAt?: string | null;
   report?: string;
   executionWaveId?: string;
+  submissionAttemptId?: string;
 }): Promise<void> {
   const ref = `T-001#${options.blockId}`;
   const runsRoot = join(options.resultsDir, "T-001", "blocks", options.blockId, "runs");
@@ -90,6 +91,7 @@ async function writeBlockRun(options: {
     startedAt: options.startedAt,
     finishedAt: options.finishedAt,
     executionWaveId: options.executionWaveId,
+    submissionAttemptId: options.submissionAttemptId,
     exitCode: options.finishedAt ? 0 : null
   });
   await recordBlockRunInIndex(runsRoot, options.runId);
@@ -468,11 +470,19 @@ describe("desktop Task Workspace aggregate API", () => {
     const runId = "RUN-REPORT-LATER";
     const recordId = `T-001#B-001::${runId}`;
     const runDir = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs", runId);
-    await claimNext({ projectRoot: root });
+    const claim = await claimNext({ projectRoot: root });
+    if (
+      claim.kind !== "block" ||
+      claim.blockType !== "implementation" ||
+      !claim.submissionAttemptId
+    ) {
+      throw new Error("expected an implementation claim with a submission attempt identity");
+    }
     await writeBlockRun({
       resultsDir: init.workspace.resultsDir,
       blockId: "B-001",
       runId,
+      submissionAttemptId: claim.submissionAttemptId,
       startedAt: "2026-07-13T00:00:00.000Z",
       finishedAt: null
     });
@@ -486,6 +496,7 @@ describe("desktop Task Workspace aggregate API", () => {
     await writeJsonFile(join(runDir, "metadata.json"), {
       runId,
       ref: "T-001#B-001",
+      submissionAttemptId: claim.submissionAttemptId,
       executor: "codex",
       adapter: "codex-exec",
       startedAt: "2026-07-13T00:00:00.000Z",

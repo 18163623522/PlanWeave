@@ -7,6 +7,7 @@ import {
 } from "../taskManager/index.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readState } from "../state.js";
 import { basicManifest, createTestWorkspace } from "./promptTestHelpers.js";
 import type { PlanPackageManifest } from "../types.js";
 
@@ -62,12 +63,20 @@ describe("parallel claim", () => {
       basicManifest({ parallel: true, maxConcurrent: 2, includeSecondTask: true })
     );
 
-    expect(await claimNext({ projectRoot: enabled.root, parallel: true })).toEqual({
+    const batch = await claimNext({ projectRoot: enabled.root, parallel: true });
+    const state = await readState(enabled.init.workspace.stateFile);
+    expect(state.blocks["T-001#B-001"].submissionAttemptId).toEqual(expect.any(String));
+    expect(state.blocks["T-002#B-001"].submissionAttemptId).toEqual(expect.any(String));
+    expect(batch).toEqual({
       kind: "batch",
       refs: ["T-001#B-001", "T-002#B-001"],
       effectiveExecutors: {
         "T-001#B-001": "default",
         "T-002#B-001": "default"
+      },
+      submissionAttemptIds: {
+        "T-001#B-001": state.blocks["T-001#B-001"].submissionAttemptId,
+        "T-002#B-001": state.blocks["T-002#B-001"].submissionAttemptId
       }
     });
   });
