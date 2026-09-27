@@ -5,8 +5,7 @@ export const managementZhCnCatalog = {
   serverManagementUnavailable: "暂时无法检查管理权限，请检查连接后重试。",
   serverManagementRestoreAccess: "恢复权限",
   serverManagementDetails: "管理权限…",
-  serverManagementDeviceRemembered:
-    "已记住这台设备。访问凭据会自动刷新，长时间未打开应用也无需定期重新授权。",
+  serverManagementDeviceRemembered: "授权有效期间自动续期，无需定期重新授权。",
   serverManagementLegacy: "尚未建立设备授权。",
   serverManagementDevices: "已授权设备",
   serverManagementDevicesHint: "撤销后，该设备立即失去此 Server 的管理权限。",
@@ -16,6 +15,7 @@ export const managementZhCnCatalog = {
   serverManagementRevokeConfirm: "该设备将立即失去管理权限，再次使用需要重新授权。确认撤销？",
   serverManagementDeviceRevoked: "这台设备的授权已失效或被撤销，请恢复管理权限。",
 
+  serverManagementAdministratorId: "管理员 ID",
   serverManagementAdministrator: "管理员",
   serverManagementCheckAgain: "重新检查",
   serverManagementUpgradeTitle: "如何恢复管理授权",

@@ -1,3 +1,4 @@
+import { MonitorIcon, ShieldCheckIcon } from "lucide-react";
 import { ManagementDialog } from "../components/ManagementDialog";
 import { type ReactNode, useEffect, useState } from "react";
 import { useServerManagementAuthorization } from "../hooks/useServerManagementAuthorization";
@@ -107,8 +108,33 @@ export function ServerManagementAuthorization({
         title={t("serverManagementAuthorization")}
         t={t}
       >
-        <div className="flex flex-col gap-3">
-          <p className="text-sm text-text-muted">{t("serverManagementAuthorizationHint")}</p>
+        <div className="flex flex-col gap-5">
+          {authorized ? (
+            <div role="status" className="flex items-start gap-3 rounded-lg bg-surface-muted p-4">
+              <ShieldCheckIcon
+                aria-hidden="true"
+                className="mt-0.5 size-5 shrink-0 text-text-strong"
+              />
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-medium text-text-strong">
+                  {t("serverManagementAutomatic")}
+                </p>
+                <p className="text-xs leading-relaxed text-text-muted">
+                  {t(
+                    profile?.operatorCredentialPersistence === "session-only"
+                      ? "serverManagementSessionOnly"
+                      : management?.deviceId
+                        ? "serverManagementDeviceRemembered"
+                        : "serverManagementLegacy"
+                  )}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm leading-relaxed text-text-muted">
+              {t("serverManagementAuthorizationHint")}
+            </p>
+          )}
           {!operatorControlBridge ? <p role="alert">{t("hostAdminBridgeUnavailable")}</p> : null}
           {status && profiles.length === 0 ? <p>{t("serverManagementEmpty")}</p> : null}
           {profiles.length > 1 ? (
@@ -134,26 +160,19 @@ export function ServerManagementAuthorization({
             </select>
           ) : null}
           {profile ? (
-            <p
-              className="break-all text-xs text-text-muted"
+            <dl
+              className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs"
               data-testid="management-server-identity"
             >
-              {profile.serverBaseUrl} · {t("serverManagementAdministrator")}: {profile.operatorId}
-            </p>
-          ) : null}
-          {profile?.operatorCredentialPersistence === "session-only" && authorized ? (
-            <p className="text-sm text-text-muted">{t("serverManagementSessionOnly")}</p>
+              <dt className="text-text-muted">{t("settingsServer")}</dt>
+              <dd className="break-all">{profile.serverBaseUrl}</dd>
+              <dt className="text-text-muted">{t("serverManagementAdministratorId")}</dt>
+              <dd className="break-all">{profile.operatorId}</dd>
+            </dl>
           ) : null}
           {checking ? (
             <p role="status" className="text-sm text-text-muted">
               {t("serverManagementChecking")}
-            </p>
-          ) : null}
-          {management?.authorization && management.profileId === profileId ? (
-            <p role="status" className="text-sm text-text-muted">
-              {t(
-                management.deviceId ? "serverManagementDeviceRemembered" : "serverManagementLegacy"
-              )}
             </p>
           ) : null}
           {!authorized ? (
@@ -262,23 +281,28 @@ export function ServerManagementAuthorization({
             </details>
           ) : null}
           {authorized && management?.devices ? (
-            <div className="border-t border-border/70 pt-3">
+            <div className="space-y-3">
               <h3 className="text-sm font-medium">{t("serverManagementDevices")}</h3>
-              <p className="my-2 text-xs text-text-muted">{t("serverManagementDevicesHint")}</p>
+              <p className="text-xs leading-relaxed text-text-muted">
+                {t("serverManagementDevicesHint")}
+              </p>
               {management.devices
                 .filter((device) => !device.revokedAt)
                 .map((device) => (
                   <div
                     key={device.deviceId}
-                    className="flex items-center justify-between gap-3 border-b border-border/50 py-3"
+                    className="flex flex-wrap items-center gap-3 rounded-lg bg-surface-muted/60 p-3"
                   >
-                    <div className="min-w-0 text-sm">
-                      <p className="break-words">
-                        {device.deviceName}
-                        {device.deviceId === management.deviceId
-                          ? ` · ${t("serverManagementThisDevice")}`
-                          : ""}
-                      </p>
+                    <MonitorIcon aria-hidden="true" className="size-4 shrink-0 text-text-muted" />
+                    <div className="min-w-0 flex-1 basis-48 space-y-1 text-sm">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <p className="min-w-0 break-all font-medium">{device.deviceName}</p>
+                        {device.deviceId === management.deviceId ? (
+                          <span className="shrink-0 rounded bg-background px-2 py-0.5 text-xs text-text-muted">
+                            {t("serverManagementThisDevice")}
+                          </span>
+                        ) : null}
+                      </div>
                       <p className="text-xs text-text-muted">
                         {t("serverManagementLastUsed")}{" "}
                         {new Date(device.lastUsedAt).toLocaleString()}
@@ -315,8 +339,10 @@ export function ServerManagementAuthorization({
               ) : null}
             </div>
           ) : null}
-          <details className="border-t border-border/70 pt-3">
-            <summary className="cursor-pointer text-sm">{t("serverManagementAdvanced")}</summary>
+          <details className="border-t border-border/70 pt-4">
+            <summary className="cursor-pointer text-xs text-text-muted hover:text-text-strong">
+              {t("serverManagementAdvanced")}
+            </summary>
             <p className="my-3 text-sm text-text-muted">{t("serverManagementImportHint")}</p>
             <Button
               className="w-fit"

@@ -5,7 +5,7 @@ export const managementEnCatalog = {
   serverManagementRestoreAccess: "Restore access",
   serverManagementDetails: "Manage permissions…",
   serverManagementDeviceRemembered:
-    "This device is remembered. Access credentials refresh automatically, including after time away.",
+    "Access renews automatically while this device authorization remains valid.",
   serverManagementLegacy: "Device authorization has not been established yet.",
   serverManagementDevices: "Authorized devices",
   serverManagementDevicesHint:
@@ -18,6 +18,7 @@ export const managementEnCatalog = {
   serverManagementDeviceRevoked:
     "This device authorization is invalid or revoked. Restore access to continue.",
 
+  serverManagementAdministratorId: "Administrator ID",
   serverManagementAdministrator: "Administrator",
   serverManagementCheckAgain: "Check again",
   serverManagementUpgradeTitle: "Restore management access",
