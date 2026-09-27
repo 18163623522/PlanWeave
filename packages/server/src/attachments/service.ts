@@ -13,8 +13,10 @@ import { workspaceIdSchema } from "@planweave-ai/collaboration-protocol/core/pri
 import {
   ATTACHMENT_ERROR_MESSAGES,
   attachmentErrorCodeSchema,
+  withAttachmentCleanup,
   type AttachmentErrorCode
 } from "./errors.js";
+import type { CommentAttachmentDigestLifecycle } from "./digestLifecycle.js";
 import { CommentAttachmentBlobStore } from "./blobStore.js";
 import {
   authorizeAttachmentProjectAccess,
@@ -35,9 +37,10 @@ import type { HumanIdentityRepository } from "../identity/repository.js";
 export class CommentAttachmentServiceError extends Error {
   constructor(
     readonly code: AttachmentErrorCode,
-    message: string = ATTACHMENT_ERROR_MESSAGES[code]
+    message: string = ATTACHMENT_ERROR_MESSAGES[code],
+    options?: ErrorOptions
   ) {
-    super(message);
+    super(message, options);
     this.name = "CommentAttachmentServiceError";
   }
 }
@@ -49,18 +52,22 @@ function deny(code: AttachmentErrorCode, message?: string): never {
 function mapUnknown(error: unknown): never {
   if (error instanceof CommentAttachmentServiceError) throw error;
   if (error instanceof AttachmentRepositoryError) {
-    throw new CommentAttachmentServiceError(error.code, error.message);
+    throw new CommentAttachmentServiceError(error.code, error.message, { cause: error });
   }
   if (error instanceof ZodError) {
-    throw new CommentAttachmentServiceError("attachment_input_invalid");
+    throw new CommentAttachmentServiceError("attachment_input_invalid", undefined, {
+      cause: error
+    });
   }
   if (error instanceof Error) {
     const code = attachmentErrorCodeSchema.safeParse(error.message);
     if (code.success) {
-      throw new CommentAttachmentServiceError(code.data);
+      throw new CommentAttachmentServiceError(code.data, undefined, { cause: error });
     }
     if (error.message === "attachment_write_stalled") {
-      throw new CommentAttachmentServiceError("attachment_input_invalid");
+      throw new CommentAttachmentServiceError("attachment_input_invalid", undefined, {
+        cause: error
+      });
     }
     if (
       error.message === "attachment_blob_conflict" ||
@@ -68,7 +75,9 @@ function mapUnknown(error: unknown): never {
       error.message === "attachment_blob_digest_mismatch" ||
       error.message === "attachment_path_escape"
     ) {
-      throw new CommentAttachmentServiceError("attachment_input_invalid", error.message);
+      throw new CommentAttachmentServiceError("attachment_input_invalid", error.message, {
+        cause: error
+      });
     }
   }
   throw error;
@@ -77,6 +86,7 @@ function mapUnknown(error: unknown): never {
 export type CommentAttachmentServiceOptions = {
   repository: CommentAttachmentRepository;
   blobs: CommentAttachmentBlobStore;
+  lifecycle: CommentAttachmentDigestLifecycle;
   identity: HumanIdentityRepository;
   clock?: () => Date;
 };
@@ -219,22 +229,42 @@ export class CommentAttachmentService {
         })();
       }
 
-      await this.options.blobs.put({
+      const staged = await this.options.blobs.stage({
         expectedSha256: digest,
         expectedSizeBytes: record.expectedSizeBytes,
         mediaType,
         chunks
       });
-
-      return this.options.repository.markUploaded({
-        workspaceId: input.workspaceId,
-        projectId: input.projectId,
-        pendingUploadId: input.pendingUploadId,
-        digestSha256: digest,
-        sizeBytes: record.expectedSizeBytes,
-        mediaType,
-        uploadedAt: this.clock().toISOString()
-      });
+      return await withAttachmentCleanup(
+        () =>
+          this.options.lifecycle.withDigest(digest, async () => {
+            const current = this.options.repository.getPendingRequired(
+              input.workspaceId,
+              input.projectId,
+              input.pendingUploadId
+            );
+            const currentAuth = authorizePendingUploadMutation({
+              subject,
+              projectId: input.projectId,
+              record: current,
+              now: this.clock(),
+              requiredStatus: ["pending"],
+              sameHumanPrincipal: (left, right) => this.sameHumanPrincipal(left, right)
+            });
+            if (!currentAuth.allowed) deny(currentAuth.code, currentAuth.message);
+            await staged.publish();
+            return this.options.repository.markUploaded({
+              workspaceId: input.workspaceId,
+              projectId: input.projectId,
+              pendingUploadId: input.pendingUploadId,
+              digestSha256: digest,
+              sizeBytes: record.expectedSizeBytes,
+              mediaType,
+              uploadedAt: this.clock().toISOString()
+            });
+          }),
+        () => staged.dispose()
+      );
     } catch (error) {
       mapUnknown(error);
     }
@@ -499,17 +529,37 @@ export class CommentAttachmentService {
     let removedPending = 0;
     let removedBlobs = 0;
     for (const record of expired) {
-      this.options.repository.markExpired(workspace, record.projectId, record.pendingUploadId);
-      const { digestSha256 } = this.options.repository.deletePending(
-        workspace,
-        record.projectId,
-        record.pendingUploadId
-      );
-      removedPending += 1;
-      if (digestSha256) {
-        const deleted = await this.options.blobs.deleteIfUnreferenced(digestSha256);
-        if (deleted) removedBlobs += 1;
-      }
+      const expire = async () => {
+        if (
+          !this.options.repository.markExpired(
+            workspace,
+            project,
+            record.pendingUploadId,
+            nowIso,
+            record.digestSha256
+          )
+        )
+          return;
+        const removed = this.options.repository.deletePending(
+          workspace,
+          project,
+          record.pendingUploadId
+        );
+        if (removed.removed) removedPending += 1;
+        if (
+          removed.digestSha256 &&
+          (await this.options.blobs.deleteIfUnreferenced(removed.digestSha256))
+        )
+          removedBlobs += 1;
+      };
+      if (record.digestSha256) await this.options.lifecycle.withDigest(record.digestSha256, expire);
+      else await expire();
+    }
+    // Failed reference commits and interrupted deletions leave retryable unreferenced metadata.
+    for (const digest of this.options.repository.listUnreferencedBlobDigests(limit)) {
+      await this.options.lifecycle.withDigest(digest, async () => {
+        if (await this.options.blobs.deleteIfUnreferenced(digest)) removedBlobs += 1;
+      });
     }
     return { removedPending, removedBlobs };
   }

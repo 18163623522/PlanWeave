@@ -1,3 +1,4 @@
+import { CommentAttachmentDigestLifecycle } from "../attachments/digestLifecycle.js";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -125,6 +126,7 @@ async function openStack() {
   const blobs = new CommentAttachmentBlobStore(database, directory);
   const attachmentService = new CommentAttachmentService({
     repository: attachmentRepository,
+    lifecycle: new CommentAttachmentDigestLifecycle(database, directory),
     blobs,
     identity,
     clock: () => now

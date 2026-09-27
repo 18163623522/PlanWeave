@@ -358,18 +358,27 @@ export class CommentAttachmentRepository {
     });
   }
 
-  markExpired(workspaceId: string, projectId: string, pendingUploadId: string): void {
-    this.database
+  markExpired(
+    workspaceId: string,
+    projectId: string,
+    pendingUploadId: string,
+    nowIso: string,
+    expectedDigestSha256?: string
+  ): boolean {
+    const result = this.database
       .prepare(
         `UPDATE comment_pending_uploads SET status='expired'
          WHERE workspace_id=? AND project_id=? AND pending_upload_id=?
-           AND status IN ('pending','uploaded')`
+           AND status IN ('pending','uploaded','expired') AND expires_at <= ? AND digest_sha256 IS ?`
       )
       .run(
         workspaceIdSchema.parse(workspaceId),
         humanProjectIdSchema.parse(projectId),
-        pendingAttachmentUploadIdSchema.parse(pendingUploadId)
+        pendingAttachmentUploadIdSchema.parse(pendingUploadId),
+        nowIso,
+        expectedDigestSha256 ?? null
       );
+    return result.changes === 1;
   }
 
   /**
@@ -404,6 +413,19 @@ export class CommentAttachmentRepository {
     const commentId = commentIdSchema.parse(input.commentId);
     const bindings: CommentAttachmentBinding[] = [];
     for (const attachment of input.attachments) {
+      // A retained finalized reference protects synchronous comment binding from concurrent GC.
+      const finalized = this.database
+        .prepare(`SELECT 1 AS present FROM comment_pending_uploads
+        WHERE workspace_id=? AND project_id=? AND digest_sha256=? AND status='finalized'
+          AND expected_size_bytes=? AND media_type=? LIMIT 1`)
+        .get(
+          workspaceId,
+          projectId,
+          attachment.digestSha256,
+          attachment.sizeBytes,
+          attachment.mediaType
+        );
+      if (!finalized) throw new AttachmentRepositoryError("attachment_status_conflict");
       this.database
         .prepare(
           `INSERT INTO comment_attachment_bindings(
@@ -519,7 +541,7 @@ export class CommentAttachmentRepository {
       .prepare(
         `SELECT * FROM comment_pending_uploads
          WHERE workspace_id=? AND project_id=?
-           AND status IN ('pending','uploaded')
+           AND status IN ('pending','uploaded','expired')
            AND expires_at <= ?
          ORDER BY expires_at ASC
          LIMIT ?`
@@ -528,25 +550,39 @@ export class CommentAttachmentRepository {
     return rows.map(toPendingRecord);
   }
 
+  listUnreferencedBlobDigests(limit: number): string[] {
+    return this.database
+      .prepare(`SELECT digest_sha256 FROM comment_attachment_blobs AS blob
+      WHERE NOT EXISTS (SELECT 1 FROM comment_pending_uploads WHERE digest_sha256=blob.digest_sha256 AND status IN ('uploaded','finalized'))
+      AND NOT EXISTS (SELECT 1 FROM comment_attachment_bindings WHERE digest_sha256=blob.digest_sha256)
+      LIMIT ?`)
+      .all(limit)
+      .map((row) => commentContentSha256Schema.parse(row.digest_sha256));
+  }
+
   deletePending(
     workspaceId: string,
     projectId: string,
     pendingUploadId: PendingAttachmentUploadId | string
   ): {
     digestSha256?: string;
+    removed: boolean;
   } {
-    const record = this.getPending(workspaceId, projectId, pendingUploadId);
-    this.database
-      .prepare(
-        `DELETE FROM comment_pending_uploads
-         WHERE workspace_id=? AND project_id=? AND pending_upload_id=?`
-      )
-      .run(
-        workspaceIdSchema.parse(workspaceId),
-        humanProjectIdSchema.parse(projectId),
-        pendingAttachmentUploadIdSchema.parse(pendingUploadId)
-      );
-    return { digestSha256: record?.digestSha256 };
+    return inWriteTransaction(this.database, () => {
+      const record = this.getPending(workspaceId, projectId, pendingUploadId);
+      const result = this.database
+        .prepare(`DELETE FROM comment_pending_uploads
+        WHERE workspace_id=? AND project_id=? AND pending_upload_id=? AND status='expired'`)
+        .run(
+          workspaceIdSchema.parse(workspaceId),
+          humanProjectIdSchema.parse(projectId),
+          pendingAttachmentUploadIdSchema.parse(pendingUploadId)
+        );
+      return {
+        digestSha256: result.changes === 1 ? record?.digestSha256 : undefined,
+        removed: result.changes === 1
+      };
+    });
   }
 
   /** Resolve a finalized pending upload for comment create attachment inputs. */

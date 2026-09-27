@@ -1,5 +1,50 @@
 import { z } from "zod";
 
+/** Keep the operation's error identity and diagnostics when cleanup also fails. */
+export function withAttachmentCleanupFailure(primary: unknown, cleanup: unknown): unknown {
+  if (primary instanceof Error) {
+    const descriptor = Object.getOwnPropertyDescriptor(primary, "cause");
+    if (
+      (!descriptor && Object.isExtensible(primary)) ||
+      descriptor?.configurable ||
+      (descriptor && "writable" in descriptor && descriptor.writable)
+    ) {
+      const cause =
+        primary.cause === undefined
+          ? cleanup
+          : new AggregateError([primary.cause, cleanup], "attachment_cleanup_failed");
+      Object.defineProperty(primary, "cause", {
+        value: cause,
+        configurable: descriptor?.configurable ?? true
+      });
+      return primary;
+    }
+  }
+  return new AggregateError([primary, cleanup], "attachment_operation_and_cleanup_failed", {
+    cause: primary
+  });
+}
+
+export async function withAttachmentCleanup<T>(
+  action: () => Promise<T>,
+  cleanup: () => Promise<void>
+): Promise<T> {
+  let result!: T;
+  let failure: { error: unknown } | undefined;
+  try {
+    result = await action();
+  } catch (error) {
+    failure = { error };
+  }
+  try {
+    await cleanup();
+  } catch (error) {
+    failure = { error: failure ? withAttachmentCleanupFailure(failure.error, error) : error };
+  }
+  if (failure) throw failure.error;
+  return result;
+}
+
 /**
  * Stable error codes for human comment-attachment authorization and staged blob ops.
  * Never include digests, paths, host tokens, or package dumps in messages.

@@ -15,6 +15,7 @@ import {
   CommentAttachmentRepository,
   CommentAttachmentService
 } from "../attachments/index.js";
+import { CommentAttachmentDigestLifecycle } from "../attachments/digestLifecycle.js";
 import { observerEventsForActivity } from "../humanObserverActivity.js";
 import { HumanObserverJournal } from "../humanObserverJournal.js";
 import type { HumanIdentityRepository } from "../identity/index.js";
@@ -119,6 +120,7 @@ export function createActivityCommentsComposition(input: {
   });
   const commentAttachments = new CommentAttachmentService({
     repository: commentAttachmentRepository,
+    lifecycle: new CommentAttachmentDigestLifecycle(input.database, input.config.dataDirectory),
     blobs: new CommentAttachmentBlobStore(input.database, input.config.dataDirectory),
     identity: input.humanIdentity,
     clock: input.clock

@@ -43,6 +43,10 @@ export function shouldSkipArchivePath(path: string): boolean {
     parts[0]?.startsWith(RESTORE_STAGING_PREFIX) === true ||
     parts[0]?.startsWith(SERVER_DATA_RESTORE_BACKUP_PREFIX) === true ||
     (["artifacts", "comment-attachments"].includes(parts[0] ?? "") && parts[1] === "tmp") ||
+    (parts[0] === "comment-attachments" &&
+      ["lifecycle.sqlite", "lifecycle.sqlite-wal", "lifecycle.sqlite-shm"].includes(
+        parts[1] ?? ""
+      )) ||
     parts.at(-1) === ".ds_store"
   );
 }

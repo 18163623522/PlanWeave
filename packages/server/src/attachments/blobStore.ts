@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, type ReadStream } from "node:fs";
-import { chmod, link, mkdir, open, readFile, realpath, rm, stat, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, realpath, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import {
@@ -10,6 +10,7 @@ import {
 } from "../comments/schemas.js";
 import type { SqliteDatabase } from "../sqlite.js";
 import { COMMENT_ATTACHMENT_MAX_BYTES } from "../comments/limits.js";
+import { withAttachmentCleanup, withAttachmentCleanupFailure } from "./errors.js";
 
 const relativePathSchema = z.string().regex(/^[a-f0-9]{2}\/[a-f0-9]{64}$/);
 
@@ -54,12 +55,15 @@ export class CommentAttachmentBlobStore {
     this.temporaryDirectory = join(this.rootDirectory, "tmp");
   }
 
-  async put(input: {
+  async stage(input: {
     expectedSha256: string;
     expectedSizeBytes: number;
     mediaType: CommentAttachmentMediaType;
     chunks: AsyncIterable<Uint8Array>;
-  }): Promise<CommentAttachmentBlobMetadata> {
+  }): Promise<{
+    publish: () => Promise<CommentAttachmentBlobMetadata>;
+    dispose: () => Promise<void>;
+  }> {
     const expectedSha256 = commentContentSha256Schema.parse(input.expectedSha256);
     const mediaType = commentAttachmentMediaTypeSchema.parse(input.mediaType);
     if (
@@ -80,63 +84,100 @@ export class CommentAttachmentBlobStore {
     const hash = createHash("sha256");
     let sizeBytes = 0;
     try {
-      try {
-        for await (const chunk of input.chunks) {
-          sizeBytes += chunk.byteLength;
-          if (sizeBytes > input.expectedSizeBytes || sizeBytes > this.maxBytes) {
-            throw new Error("attachment_size_mismatch");
+      await withAttachmentCleanup(
+        async () => {
+          for await (const chunk of input.chunks) {
+            sizeBytes += chunk.byteLength;
+            if (sizeBytes > input.expectedSizeBytes || sizeBytes > this.maxBytes) {
+              throw new Error("attachment_size_mismatch");
+            }
+            hash.update(chunk);
+            let offset = 0;
+            while (offset < chunk.byteLength) {
+              const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
+              if (bytesWritten < 1) throw new Error("attachment_write_stalled");
+              offset += bytesWritten;
+            }
           }
-          hash.update(chunk);
-          let offset = 0;
-          while (offset < chunk.byteLength) {
-            const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
-            if (bytesWritten < 1) throw new Error("attachment_write_stalled");
-            offset += bytesWritten;
-          }
-        }
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+          await handle.sync();
+        },
+        () => handle.close()
+      );
 
       if (sizeBytes !== input.expectedSizeBytes) throw new Error("attachment_size_mismatch");
       const actualSha256 = hash.digest("hex");
       if (actualSha256 !== expectedSha256) throw new Error("attachment_digest_mismatch");
 
-      const relativePath = relativePathSchema.parse(
-        `${expectedSha256.slice(0, 2)}/${expectedSha256}`
-      );
-      const finalDirectory = join(this.blobsDirectory, expectedSha256.slice(0, 2));
-      const finalPath = join(finalDirectory, expectedSha256);
-      await mkdir(finalDirectory, { recursive: true, mode: 0o700 });
-      await chmod(finalDirectory, 0o700);
-      await assertPathInsideRoot(this.blobsDirectory, finalPath);
-
+      return {
+        publish: () => this.publishStaged(temporaryPath, expectedSha256, sizeBytes, mediaType),
+        dispose: () => this.removeStagingFile(temporaryPath)
+      };
+    } catch (error) {
       try {
-        await link(temporaryPath, finalPath);
-        await chmod(finalPath, 0o600);
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-        if ((await stat(finalPath)).size !== sizeBytes) {
-          throw new Error("attachment_blob_conflict");
-        }
+        await this.removeStagingFile(temporaryPath);
+      } catch (cleanupError) {
+        throw withAttachmentCleanupFailure(error, cleanupError);
       }
-
-      const createdAt = new Date().toISOString();
-      this.database
-        .prepare(
-          `INSERT INTO comment_attachment_blobs(
-            digest_sha256,size_bytes,media_type,relative_path,created_at
-          ) VALUES (?,?,?,?,?)
-          ON CONFLICT(digest_sha256) DO NOTHING`
-        )
-        .run(expectedSha256, sizeBytes, mediaType, relativePath, createdAt);
-      return this.getRequired(expectedSha256);
-    } finally {
-      await unlink(temporaryPath).catch((error: unknown) => {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-      });
+      throw error;
     }
+  }
+
+  /** Standalone content publication; application references are coordinated by the service. */
+  async put(
+    input: Parameters<CommentAttachmentBlobStore["stage"]>[0]
+  ): Promise<CommentAttachmentBlobMetadata> {
+    const staged = await this.stage(input);
+    return withAttachmentCleanup(
+      () => staged.publish(),
+      () => staged.dispose()
+    );
+  }
+
+  private async publishStaged(
+    temporaryPath: string,
+    expectedSha256: string,
+    sizeBytes: number,
+    mediaType: CommentAttachmentMediaType
+  ): Promise<CommentAttachmentBlobMetadata> {
+    const relativePath = relativePathSchema.parse(
+      `${expectedSha256.slice(0, 2)}/${expectedSha256}`
+    );
+    const finalDirectory = join(this.blobsDirectory, expectedSha256.slice(0, 2));
+    const finalPath = join(finalDirectory, expectedSha256);
+    await mkdir(finalDirectory, { recursive: true, mode: 0o700 });
+    await chmod(finalDirectory, 0o700);
+    await assertPathInsideRoot(this.blobsDirectory, finalPath);
+
+    try {
+      await link(temporaryPath, finalPath);
+      await chmod(finalPath, 0o600);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      const existing = await readFile(finalPath);
+      if (
+        existing.length !== sizeBytes ||
+        createHash("sha256").update(existing).digest("hex") !== expectedSha256
+      ) {
+        throw new Error("attachment_blob_conflict");
+      }
+    }
+
+    const createdAt = new Date().toISOString();
+    this.database
+      .prepare(
+        `INSERT INTO comment_attachment_blobs(
+          digest_sha256,size_bytes,media_type,relative_path,created_at
+        ) VALUES (?,?,?,?,?)
+        ON CONFLICT(digest_sha256) DO NOTHING`
+      )
+      .run(expectedSha256, sizeBytes, mediaType, relativePath, createdAt);
+    return this.getRequired(expectedSha256);
+  }
+
+  private async removeStagingFile(temporaryPath: string): Promise<void> {
+    await unlink(temporaryPath).catch((error: unknown) => {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    });
   }
 
   get(digestSha256: string): CommentAttachmentBlobMetadata | undefined {
@@ -198,10 +239,10 @@ export class CommentAttachmentBlobStore {
       .get(digest, digest);
     if (referenced) return false;
 
-    const path = await this.resolveBlobPath(digest).catch(() => undefined);
-    if (path) {
-      await rm(path, { force: true });
-    }
+    const path = await this.resolveBlobPath(digest);
+    await unlink(path).catch((error: unknown) => {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    });
     const result = this.database
       .prepare("DELETE FROM comment_attachment_blobs WHERE digest_sha256=?")
       .run(digest);
