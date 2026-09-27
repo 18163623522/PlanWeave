@@ -7,6 +7,7 @@ import { createAcpRunner } from "../autoRun/acpRunner.js";
 import { createExecutorAdapter, inspectExecutorAcpProfile } from "../autoRun/executors.js";
 import { executionWaveIdSchema } from "../autoRun/runnerContractSchemas.js";
 import { getTaskWorkspace, listTaskWorkspaceRuns } from "../desktop/taskWorkspaceApi.js";
+import { readState } from "../state.js";
 import { readJsonFile } from "../json.js";
 import { runAutoRunStep } from "../taskManager/autoRunStep.js";
 import { getExecutionStatus } from "../taskManager/executionStatus.js";
@@ -194,7 +195,8 @@ describe("AcpRunner claim routing", () => {
 
   it("publishes an active ACP block run before execution settles", async () => {
     const { root, init } = await createTestWorkspace();
-    await claimNext({ projectRoot: init.workspace });
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block") throw new Error("expected implementation claim");
     let releaseIndex!: () => void;
     const indexRelease = new Promise<void>((resolve) => {
       releaseIndex = resolve;
@@ -213,24 +215,15 @@ describe("AcpRunner claim routing", () => {
         await indexRelease;
       }
     });
-    const execution = runner.runBlock(
-      {
-        projectRoot: init.workspace,
-        claim: {
-          kind: "block",
-          ref: "T-001#B-001",
-          taskId: "T-001",
-          blockId: "B-001",
-          blockType: "implementation",
-          effectiveExecutor: "codex-acp"
-        },
-        prompt: "implement",
-        executorName: "codex-acp",
-        profile,
-        profileSource: "builtin"
-      },
-      definition("artifact-implementation")
-    );
+    const input = {
+      projectRoot: init.workspace,
+      claim,
+      prompt: "implement",
+      executorName: "codex-acp",
+      profile,
+      profileSource: "builtin" as const
+    };
+    const execution = runner.runBlock(input, definition("artifact-implementation"));
     let settled = false;
     void execution.then(
       () => {
@@ -242,26 +235,50 @@ describe("AcpRunner claim routing", () => {
     );
 
     await indexPublished;
-    const workspace = await getTaskWorkspace({
-      projectRoot: root,
-      canvasId: "default",
-      taskId: "T-001"
-    });
-    const runs = await listTaskWorkspaceRuns({
-      projectRoot: root,
-      canvasId: "default",
-      taskId: "T-001"
-    });
-    expect(settled).toBe(false);
-    const liveRun = runs.items.find((item) => item.run.duration.finishedAt === null);
-    if (!liveRun) throw new Error("Expected the indexed ACP run to remain unfinished.");
-    expect(workspace.activeRecordIds).toContain(liveRun.run.record.recordId);
-    expect(liveRun).toMatchObject({
-      active: true,
-      run: { metadata: { runnerKind: "acp" } }
-    });
+    try {
+      const workspace = await getTaskWorkspace({
+        projectRoot: root,
+        canvasId: "default",
+        taskId: "T-001"
+      });
+      const runs = await listTaskWorkspaceRuns({
+        projectRoot: root,
+        canvasId: "default",
+        taskId: "T-001"
+      });
+      expect(settled).toBe(false);
+      const liveRun = runs.items.find((item) => item.run.duration.finishedAt === null);
+      if (!liveRun) throw new Error("Expected the indexed ACP run to remain unfinished.");
+      expect(workspace.activeRecordIds).toContain(liveRun.run.record.recordId);
+      expect(liveRun).toMatchObject({
+        active: true,
+        run: { metadata: { runnerKind: "acp" } }
+      });
 
-    releaseIndex();
+      const metadataPath = join(
+        init.workspace.resultsDir,
+        "T-001",
+        "blocks",
+        "B-001",
+        "runs",
+        "RUN-001",
+        "metadata.json"
+      );
+      const original = await readFile(metadataPath, "utf8");
+      expect(JSON.parse(original)).toMatchObject({
+        submissionAttemptId: claim.submissionAttemptId,
+        executionAdmittedAt: expect.any(String),
+        adapter: "agent"
+      });
+      const before = await readState(init.workspace.stateFile);
+      await expect(runner.runBlock(input, definition("artifact-implementation"))).rejects.toThrow(
+        "already admitted"
+      );
+      expect(await readState(init.workspace.stateFile)).toEqual(before);
+      expect(await readFile(metadataPath, "utf8")).toBe(original);
+    } finally {
+      releaseIndex();
+    }
     await expect(execution).resolves.toMatchObject({ kind: "block", runnerKind: "acp" });
   });
 

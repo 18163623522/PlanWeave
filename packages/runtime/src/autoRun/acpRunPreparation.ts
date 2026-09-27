@@ -2,8 +2,14 @@ import { writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parseBlockRef } from "../graph/compileTaskGraph.js";
 import { loadPackage } from "../package/loadPackage.js";
-import type { PackageWorkspaceRef, ProjectWorkspace } from "../types.js";
-import { allocateRunId, workspaceExecutionCwd } from "./executorShared.js";
+import type { AgentExecutorProfile, PackageWorkspaceRef, ProjectWorkspace } from "../types.js";
+import {
+  allocateRunId,
+  prepareBlockRun,
+  workspaceExecutionCwd,
+  type BlockClaim
+} from "./executorShared.js";
+import type { ExecutionWaveId } from "./runnerContractSchemas.js";
 
 export type PreparedAcpRun = {
   runId: string;
@@ -12,15 +18,43 @@ export type PreparedAcpRun = {
   cwd: string;
   projectId: string;
   canvasId: string;
+  implementationIdentity?: {
+    adapter: "agent";
+    submissionAttemptId?: string;
+    executionAdmittedAt: string;
+  };
 };
 
 export async function prepareAcpBlockRun(input: {
   projectRoot: PackageWorkspaceRef;
-  ref: string;
+  claim: BlockClaim;
+  executorName: string;
+  profile: AgentExecutorProfile;
   prompt: string;
+  executionWaveId?: ExecutionWaveId;
 }): Promise<PreparedAcpRun> {
   const { workspace } = await loadPackage(input.projectRoot);
-  const { taskId, blockId } = parseBlockRef(input.ref);
+  if (input.claim.blockType === "implementation") {
+    const run = await prepareBlockRun({ ...input, adapter: "agent" });
+    if (!run.executionAdmittedAt)
+      throw new Error("ACP implementation preparation has no execution admission.");
+    return {
+      runId: run.runId,
+      runDir: run.runDir,
+      metadataPath: run.metadataPath,
+      cwd: workspaceExecutionCwd(workspace),
+      projectId: workspace.id,
+      canvasId: basename(dirname(workspace.packageDir)),
+      implementationIdentity: {
+        adapter: "agent",
+        executionAdmittedAt: run.executionAdmittedAt,
+        ...(input.claim.submissionAttemptId
+          ? { submissionAttemptId: input.claim.submissionAttemptId }
+          : {})
+      }
+    };
+  }
+  const { taskId, blockId } = parseBlockRef(input.claim.ref);
   return prepare(
     join(workspace.resultsDir, taskId, "blocks", blockId, "runs"),
     workspace,

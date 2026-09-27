@@ -339,7 +339,7 @@ export async function prepareBlockRun(options: {
   projectRoot: PackageWorkspaceRef;
   claim: BlockClaim;
   executorName: string;
-  adapter: ExecutorIntegrationName;
+  adapter: ExecutorIntegrationName | ExecutorProfile["adapter"];
   profile: ExecutorProfile;
   prompt: string;
   executionWaveId?: ExecutionWaveId;
@@ -349,6 +349,7 @@ export async function prepareBlockRun(options: {
   promptPath: string;
   metadataPath: string;
   startedAt: string;
+  executionAdmittedAt?: string;
 }> {
   const { workspace } = await loadPackage(options.projectRoot);
   const { taskId, blockId } = parseBlockRef(options.claim.ref);
@@ -397,15 +398,18 @@ export async function prepareBlockRun(options: {
       const promptPath = join(runDir, "prompt.md");
       if (!(await pathExists(promptPath))) await writeFile(promptPath, options.prompt, "utf8");
       await recordBlockRunInIndex(runRoot, existingRunId);
-      if (options.adapter !== "manual") {
-        await finishRunMetadata(metadataPath, { executionAdmittedAt: new Date().toISOString() });
+      const executionAdmittedAt =
+        options.adapter !== "manual" ? new Date().toISOString() : undefined;
+      if (executionAdmittedAt) {
+        await finishRunMetadata(metadataPath, { executionAdmittedAt });
       }
       return {
         runId: existingRunId,
         runDir,
         promptPath,
         metadataPath,
-        startedAt: metadata.startedAt
+        startedAt: metadata.startedAt,
+        ...(executionAdmittedAt ? { executionAdmittedAt } : {})
       };
     }
     const runId = await allocateRunId(runRoot);
@@ -456,10 +460,18 @@ export async function prepareBlockRun(options: {
     }
     await writeFile(promptPath, options.prompt, "utf8");
     await recordBlockRunInIndex(runRoot, runId);
-    if (options.adapter !== "manual") {
-      await finishRunMetadata(metadataPath, { executionAdmittedAt: new Date().toISOString() });
+    const executionAdmittedAt = options.adapter !== "manual" ? new Date().toISOString() : undefined;
+    if (executionAdmittedAt) {
+      await finishRunMetadata(metadataPath, { executionAdmittedAt });
     }
-    return { runId, runDir, promptPath, metadataPath, startedAt };
+    return {
+      runId,
+      runDir,
+      promptPath,
+      metadataPath,
+      startedAt,
+      ...(executionAdmittedAt ? { executionAdmittedAt } : {})
+    };
   });
 }
 

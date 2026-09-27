@@ -422,8 +422,11 @@ export function createAcpRunner(options?: {
         : input.prompt;
       const prepared = await prepareAcpBlockRun({
         projectRoot: input.projectRoot,
-        ref: input.claim.ref,
-        prompt
+        claim: input.claim,
+        executorName: input.executorName,
+        profile: input.profile,
+        prompt,
+        executionWaveId: input.executionWaveId
       });
       try {
         return await sessionController.execute(
@@ -457,6 +460,7 @@ export function createAcpRunner(options?: {
             taskId: input.claim.taskId,
             metadataIdentity: {
               blockId: input.claim.blockId,
+              ...prepared.implementationIdentity,
               ...(input.executionWaveId ? { executionWaveId: input.executionWaveId } : {})
             },
             projectId: prepared.projectId,
