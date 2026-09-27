@@ -50,6 +50,14 @@ export const workspaceMappingsInventory = [
     "Agent Host client tests report empty mapping observations."
   ),
   inventoryEntry(
+    "wm-agentHostInteractionClock-test",
+    "workspaceMappings",
+    "endpoint_readiness",
+    "packages/agent-host/src/__tests__/agentHostInteractionClock.test.ts",
+    "readiness.workspaceMappings: []",
+    "Interaction clock transport tests report empty mapping observations."
+  ),
+  inventoryEntry(
     "wm-agentHostStartupDiscovery-test",
     "workspaceMappings",
     "endpoint_readiness",
