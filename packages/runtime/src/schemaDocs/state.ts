@@ -33,6 +33,10 @@ export const stateSchemaDocument: SchemaDocument<"state"> = {
           "diverged"
         ],
         lastRunId: "string | null, optional",
+        submissionAttemptId:
+          "non-empty string, optional durable identity of the current implementation claim",
+        submissionRunId:
+          "RUN-NNN string, optional durable run reservation for the current submission attempt",
         latestReviewAttemptId: "string | null, optional",
         activeFeedbackId: "string | null, optional",
         pendingFeedbackId: "string | null, optional",

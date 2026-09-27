@@ -659,6 +659,7 @@
         "projectId.test.ts",
         "projectMetadata.test.ts",
         "remoteBlockRuntime.test.ts",
+        "remoteReviewRuntime.test.ts",
         "remoteBlockSourceSnapshot.test.ts",
         "remoteOwnershipTransitions.test.ts",
         "resetRuntimeState.test.ts",

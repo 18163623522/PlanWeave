@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { OUTPUT_MAX_ARTIFACT_BYTES } from "@planweave-ai/agent-host-protocol/browser";
 import {
@@ -17,9 +17,9 @@ import { writeJsonFile } from "../json.js";
 import { loadPackage } from "../package/loadPackage.js";
 import { writeState } from "../state.js";
 import type {
+  BlockState,
   ExecutionGraphSession,
   PackageWorkspaceRef,
-  ProjectWorkspace,
   SubmitResult
 } from "../types.js";
 import {
@@ -28,7 +28,7 @@ import {
 } from "./implementationRunMetadata.js";
 import { exists, loadRuntime, loadRuntimeReadonly, refreshDerivedState } from "./runtimeContext.js";
 import { getBlock } from "./selectors.js";
-import { incrementTaskIndexCount, readTaskIndex, updateTaskIndex } from "./resultIndex.js";
+import { incrementTaskIndexCount, updateTaskIndex } from "./resultIndex.js";
 import { withoutRemoteBlockOwnership } from "./remoteOwnershipTransitions.js";
 import {
   assertActiveRemoteBlockOwnership,
@@ -103,37 +103,110 @@ async function runHasSubmittedResult(
   return true;
 }
 
-async function findPersistedRun(
-  workspace: ProjectWorkspace,
-  taskId: string,
-  blockId: string,
-  ref: string,
-  artifact: BlockSubmissionArtifact
-): Promise<string | null> {
-  const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
-  const index = await readTaskIndex(workspace, taskId);
-  const indexedRunId = index.latestRunByBlock?.[ref];
-  if (
-    indexedRunId &&
-    (await runHasSubmittedResult(join(runRoot, indexedRunId), ref, indexedRunId, artifact))
-  ) {
-    return indexedRunId;
-  }
+async function findAttemptRun(runRoot: string, attemptId: string): Promise<string | null> {
   const entries = await optionalReaddir(runRoot, { withFileTypes: true });
-  if (!entries) {
-    return null;
+  const matches: string[] = [];
+  for (const entry of entries ?? []) {
+    if (!entry.isDirectory() || !/^RUN-\d+$/.test(entry.name)) continue;
+    const metadataPath = join(runRoot, entry.name, "metadata.json");
+    if (!(await exists(metadataPath))) continue;
+    const metadata = await readImplementationRunMetadataFile(metadataPath);
+    if (metadata.submissionAttemptId === attemptId) matches.push(entry.name);
   }
-  const runIds = entries
-    .filter((entry) => entry.isDirectory() && /^RUN-\d+$/.test(entry.name))
-    .map((entry) => entry.name)
-    .sort()
-    .reverse();
-  for (const runId of runIds) {
-    if (await runHasSubmittedResult(join(runRoot, runId), ref, runId, artifact)) {
-      return runId;
+  if (matches.length > 1)
+    throw new Error("Multiple RUN records belong to the same submission attempt.");
+  return matches[0] ?? null;
+}
+
+async function resolveSubmissionRun(options: {
+  runRoot: string;
+  blockState: BlockState;
+  attemptId: string | undefined;
+  runId: string | undefined;
+  ref: string;
+  taskId: string;
+  blockId: string;
+  local: boolean;
+}): Promise<{
+  candidateRunId: string | undefined;
+  candidateMetadata: ImplementationRunMetadata;
+  candidateDirectoryExists: boolean;
+}> {
+  const { runRoot, blockState, attemptId, runId, ref, taskId, blockId, local } = options;
+  const reservedRunId =
+    blockState.submissionAttemptId === attemptId ? blockState.submissionRunId : undefined;
+  if (runId && reservedRunId && runId !== reservedRunId) {
+    throw new Error(`Run '${runId}' conflicts with submission run '${reservedRunId}'.`);
+  }
+  let candidateRunId = runId ?? reservedRunId;
+  if (!candidateRunId && blockState.status === "completed")
+    candidateRunId = blockState.lastRunId ?? undefined;
+  if (!candidateRunId && attemptId)
+    candidateRunId = (await findAttemptRun(runRoot, attemptId)) ?? undefined;
+  if (!candidateRunId && local && blockState.status === "in_progress") {
+    const entries = await optionalReaddir(runRoot, { withFileTypes: true });
+    for (const entry of entries ?? []) {
+      if (!entry.isDirectory() || !/^RUN-\d+$/.test(entry.name)) continue;
+      const path = join(runRoot, entry.name, "metadata.json");
+      if (!(await exists(path))) {
+        if (entry.name !== blockState.lastRunId) {
+          throw new Error(
+            `Submission identity is ambiguous for incomplete run '${entry.name}'; retry with an explicit runId after confirming its claim.`
+          );
+        }
+        continue;
+      }
+      const metadata = await readImplementationRunMetadataFile(path);
+      if (!metadata.submissionAttemptId && entry.name !== blockState.lastRunId) {
+        throw new Error(
+          `Submission identity is ambiguous for legacy run '${entry.name}'; retry with an explicit runId after confirming its claim.`
+        );
+      }
     }
   }
-  return null;
+  const candidateDir = candidateRunId ? join(runRoot, candidateRunId) : null;
+  const candidateDirectoryExists = candidateDir !== null && (await exists(candidateDir));
+  const candidateMetadata =
+    candidateDir && (await exists(join(candidateDir, "metadata.json")))
+      ? await readImplementationRunMetadataFile(join(candidateDir, "metadata.json"))
+      : {};
+  if (candidateRunId) {
+    for (const [key, expected] of Object.entries({
+      ref,
+      taskId,
+      blockId,
+      runId: candidateRunId
+    })) {
+      if (candidateMetadata[key] !== undefined && candidateMetadata[key] !== expected) {
+        throw new Error(`Run '${candidateRunId}' identity conflicts with submission (${key}).`);
+      }
+    }
+    if (
+      candidateMetadata.submissionAttemptId &&
+      candidateMetadata.submissionAttemptId !== attemptId &&
+      !(
+        attemptId === undefined &&
+        blockState.status === "completed" &&
+        candidateRunId === blockState.lastRunId
+      )
+    ) {
+      throw new Error(`Run '${candidateRunId}' attempt conflicts with submission.`);
+    }
+    if (
+      !candidateMetadata.submissionAttemptId &&
+      candidateMetadata.reportHash &&
+      blockState.status === "in_progress" &&
+      candidateRunId === blockState.lastRunId
+    ) {
+      throw new Error(
+        `Submission identity is ambiguous for historical run '${candidateRunId}'; use a new runId for this claim.`
+      );
+    }
+  }
+  if (blockState.status === "completed" && candidateRunId !== blockState.lastRunId) {
+    throw new Error(`Run '${candidateRunId}' conflicts with completed submission.`);
+  }
+  return { candidateRunId, candidateMetadata, candidateDirectoryExists };
 }
 
 export async function submitBlockResult(options: {
@@ -348,13 +421,53 @@ async function submitBlockResultArtifact(
         );
       }
     }
-    const persistedRunId = await findPersistedRun(
-      workspace,
-      taskId,
-      blockId,
-      options.ref,
-      artifact
-    );
+    if (
+      authority.kind === "local" &&
+      blockState?.status !== "in_progress" &&
+      blockState?.status !== "completed"
+    ) {
+      throw new Error(`Block '${options.ref}' must be in_progress before submit-result.`);
+    }
+    if (options.runId && !/^RUN-\d+$/.test(options.runId)) {
+      throw new Error("Submission runId must be a RUN-NNN identifier.");
+    }
+    const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
+    const attemptId =
+      authority.kind === "remote"
+        ? JSON.stringify([
+            authority.identity.operationId,
+            authority.identity.controlPlane ?? "collaboration",
+            authority.identity.sourceRevision,
+            authority.identity.graphFingerprint,
+            authority.identity.dispatchId,
+            authority.identity.executionAttemptId
+          ])
+        : blockState.submissionAttemptId;
+    const { candidateRunId, candidateMetadata, candidateDirectoryExists } =
+      await resolveSubmissionRun({
+        runRoot,
+        blockState,
+        attemptId,
+        runId: options.runId,
+        ref: options.ref,
+        taskId,
+        blockId,
+        local: authority.kind === "local"
+      });
+    const candidateDir = candidateRunId ? join(runRoot, candidateRunId) : null;
+    if (
+      (candidateMetadata.reportHash && candidateMetadata.reportHash !== reportHash) ||
+      (candidateMetadata.submissionReportHash &&
+        candidateMetadata.submissionReportHash !== reportHash)
+    ) {
+      throw new Error(`Run '${candidateRunId}' report conflicts with submission.`);
+    }
+    const persistedRunId =
+      candidateRunId &&
+      candidateDir &&
+      (await runHasSubmittedResult(candidateDir, options.ref, candidateRunId, artifact))
+        ? candidateRunId
+        : null;
     if (persistedRunId) {
       const persistedRunRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
       await upsertBlockRunInIndex(persistedRunRoot, persistedRunId, true);
@@ -363,7 +476,11 @@ async function submitBlockResultArtifact(
         latestRunByBlock: {
           ...(index.latestRunByBlock ?? {}),
           [options.ref]: persistedRunId
-        }
+        },
+        counts:
+          index.latestRunByBlock?.[options.ref] === persistedRunId
+            ? index.counts
+            : incrementTaskIndexCount(index, "runs")
       }));
       state.blocks[options.ref] =
         authority.kind === "remote"
@@ -385,15 +502,56 @@ async function submitBlockResultArtifact(
     if (authority.kind === "local" && blockState?.status !== "in_progress") {
       throw new Error(`Block '${options.ref}' must be in_progress before submit-result.`);
     }
-    const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
-    let runId: string;
-    if (options.runId) {
-      runId = options.runId;
-      await mkdir(join(runRoot, runId), { recursive: true });
-    } else {
-      runId = await allocateRunId(runRoot);
+    const durableAttemptId = attemptId ?? randomUUID();
+    if (!attemptId) {
+      state.blocks[options.ref] = {
+        ...state.blocks[options.ref],
+        submissionAttemptId: durableAttemptId
+      };
+      await writeState(workspace.stateFile, state);
     }
+    const runId = candidateRunId ?? (await allocateRunId(runRoot));
     const runDir = join(runRoot, runId);
+    let createdRunDirectory = candidateRunId === undefined;
+    if (candidateRunId && !candidateDirectoryExists) {
+      await mkdir(runRoot, { recursive: true });
+      await mkdir(runDir, { recursive: false });
+      createdRunDirectory = true;
+    }
+    try {
+      await writeJsonFile(join(runDir, "metadata.json"), {
+        ...candidateMetadata,
+        ref: options.ref,
+        taskId,
+        blockId,
+        runId,
+        submissionAttemptId: durableAttemptId,
+        submissionReportHash: reportHash
+      });
+    } catch (error) {
+      if (createdRunDirectory) {
+        try {
+          await rmdir(runDir);
+        } catch (cleanupError) {
+          if (!(error instanceof Error))
+            throw new AggregateError(
+              [error, cleanupError],
+              "RUN reservation and empty-directory cleanup failed."
+            );
+          error.cause =
+            error.cause === undefined
+              ? cleanupError
+              : new AggregateError([error.cause, cleanupError], "RUN reservation cleanup failed.");
+        }
+      }
+      throw error;
+    }
+    state.blocks[options.ref] = {
+      ...state.blocks[options.ref],
+      submissionAttemptId: durableAttemptId,
+      submissionRunId: runId
+    };
+    await writeState(workspace.stateFile, state);
     const reportDestination = join(runDir, "report.md");
     const metadataPath = join(runDir, "metadata.json");
     const artifactReference =
@@ -437,6 +595,7 @@ async function submitBlockResultArtifact(
       runId,
       submittedAt: new Date().toISOString(),
       reportHash,
+      submissionAttemptId: durableAttemptId,
       ...(artifactReference ? { artifactReference } : {}),
       ...(authority.kind === "remote" && authority.transcript
         ? {

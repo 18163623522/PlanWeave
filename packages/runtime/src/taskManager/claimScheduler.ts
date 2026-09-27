@@ -19,6 +19,8 @@ import { updateTaskIndex } from "./resultIndex.js";
 import { loadRuntime, loadRuntimeReadonly, refreshDerivedState } from "./runtimeContext.js";
 import {
   markClaimed,
+  claimedBlockState,
+  getBlock,
   effectiveBlockExecutor,
   inProgressBlockRefs,
   normalizeClaimScope,
@@ -223,7 +225,7 @@ async function claimNextUnlocked(options: {
       };
     }
     for (const ref of selected) {
-      state.blocks[ref] = { ...state.blocks[ref], status: "in_progress" };
+      state.blocks[ref] = claimedBlockState(state.blocks[ref], getBlock(graph, ref).type);
       if (graph.blocksByRef.get(ref)?.type === "review") {
         state.currentReviewBlockRef = ref;
       }

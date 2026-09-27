@@ -8,6 +8,7 @@ import { createProjectGraphClaimGuard } from "./projectGraphClaimGuard.js";
 import { loadRuntime, refreshDerivedState } from "./runtimeContext.js";
 import {
   canDispatchImplementationBlock,
+  claimedBlockState,
   claimResultForBlock,
   validateClaimScope
 } from "./selectors.js";
@@ -56,7 +57,7 @@ export async function claimDispatchedBlock(options: {
         reason: `Block '${options.ref}' is not dispatchable right now.`
       };
     }
-    state.blocks[options.ref] = { ...state.blocks[options.ref], status: "in_progress" };
+    state.blocks[options.ref] = claimedBlockState(state.blocks[options.ref], block.type);
     state.currentRefs = withCurrentRef(state.currentRefs, options.ref);
     await writeState(lockedWorkspace.stateFile, refreshDerivedState(manifest, state));
     return claimResultForBlock(

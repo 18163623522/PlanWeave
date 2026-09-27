@@ -22,6 +22,11 @@ export const blockStateSchema = z
   .object({
     status: z.enum(blockStatuses),
     lastRunId: z.string().nullable().optional(),
+    submissionAttemptId: z.string().min(1).optional(),
+    submissionRunId: z
+      .string()
+      .regex(/^RUN-\d+$/)
+      .optional(),
     latestReviewAttemptId: z.string().nullable().optional(),
     activeFeedbackId: z.string().nullable().optional(),
     pendingFeedbackId: z.string().nullable().optional(),
@@ -35,6 +40,13 @@ export const blockStateSchema = z
   })
   .strict()
   .superRefine((block, context) => {
+    if (block.submissionRunId && !block.submissionAttemptId) {
+      context.addIssue({
+        code: "custom",
+        path: ["submissionRunId"],
+        message: "submission run reservation requires a submission attempt identity"
+      });
+    }
     if (block.remoteOwnership && block.status !== "in_progress" && block.status !== "diverged") {
       context.addIssue({
         code: "custom",

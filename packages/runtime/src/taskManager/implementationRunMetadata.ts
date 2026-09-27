@@ -16,6 +16,11 @@ export const implementationRunMetadataSchema = z
     taskId: z.string().min(1).optional(),
     blockId: z.string().min(1).optional(),
     runId: z.string().min(1).optional(),
+    submissionReportHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    submissionAttemptId: z.string().min(1).optional(),
     submittedAt: z.string().min(1).optional(),
     startedAt: z.union([z.string().min(1), z.null()]).optional(),
     finishedAt: z.union([z.string().min(1), z.null()]).optional(),

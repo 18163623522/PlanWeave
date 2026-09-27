@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parseBlockRef } from "../graph/compileTaskGraph.js";
 import { requireMapValue } from "../graph/requireMapValue.js";
 import type {
@@ -331,9 +331,22 @@ export function canDispatchImplementationBlock(
   return !conflictsWithCurrent && !conflictsWithSelected;
 }
 
+export function claimedBlockState(
+  blockState: BlockState,
+  blockType: ManifestBlock["type"]
+): BlockState {
+  return {
+    ...blockState,
+    status: "in_progress",
+    ...(blockType === "implementation"
+      ? { submissionAttemptId: randomUUID(), submissionRunId: undefined }
+      : {})
+  };
+}
+
 export function markClaimed(state: RuntimeState, ref: string, graph: CompiledExecutionGraph): void {
   const blockState = requireBlockState(state, ref);
-  state.blocks[ref] = { ...blockState, status: "in_progress" };
+  state.blocks[ref] = claimedBlockState(blockState, getBlock(graph, ref).type);
   state.currentRefs = [ref];
   const block = getBlock(graph, ref);
   if (block.type === "review") {

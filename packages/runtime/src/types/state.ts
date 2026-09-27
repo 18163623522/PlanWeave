@@ -37,6 +37,8 @@ export type TaskState = {
 export type BlockState = {
   status: BlockStatus;
   lastRunId?: string | null;
+  submissionAttemptId?: string;
+  submissionRunId?: string;
   latestReviewAttemptId?: string | null;
   activeFeedbackId?: string | null;
   pendingFeedbackId?: string | null;
