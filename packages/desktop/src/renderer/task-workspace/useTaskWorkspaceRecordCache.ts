@@ -236,6 +236,7 @@ type UseTaskWorkspaceRecordCacheOptions = {
 
 export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCacheOptions): {
   getRunScrollTop: (recordId: string) => number;
+  isRefreshing: boolean;
   onRunScrollTopChange: (recordId: string, scrollTop: number) => void;
   recordLoad: TaskWorkspaceRecordLoad;
 } {
@@ -254,10 +255,12 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
   onRecordReadyRef.current = options.onRecordReady;
   const [recordLoadState, setRecordLoadState] = useState({
     freshnessKey: "",
+    refreshing: false,
     load: idleTaskWorkspaceRecordLoad
   });
   const setRecordLoad = useCallback(
-    (load: TaskWorkspaceRecordLoad) => setRecordLoadState({ freshnessKey, load }),
+    (load: TaskWorkspaceRecordLoad, refreshing = false) =>
+      setRecordLoadState({ freshnessKey, load, refreshing }),
     [freshnessKey]
   );
 
@@ -294,15 +297,16 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
       return;
     }
     const retained = cache.retainedReadyRecord(authorityKey, identity.blockRef, identity.recordId);
-    if (!retained) {
-      setRecordLoad({
+    setRecordLoad(
+      retained ?? {
         ...idleTaskWorkspaceRecordLoad,
         authorityKey,
         blockRef: identity.blockRef,
         key: identity.recordId,
         status: "loading"
-      });
-    }
+      },
+      true
+    );
     const runDetailInput: TaskWorkspaceRunDetailInput = {
       canvasId: identity.canvasId,
       projectRoot: identity.projectRoot,
@@ -391,5 +395,14 @@ export function useTaskWorkspaceRecordCache(options: UseTaskWorkspaceRecordCache
     currentRecordLoad ??
     retainedRecordLoad ??
     idleTaskWorkspaceRecordLoad;
-  return { getRunScrollTop, onRunScrollTopChange, recordLoad: visibleRecordLoad };
+  // A new selection or freshness is pending even before its loading effect runs.
+  const isRefreshing = Boolean(
+    enabled &&
+      identity &&
+      api &&
+      !syntheticLoad &&
+      !cachedRecordLoad &&
+      (!currentRecordLoad || recordLoadState.refreshing)
+  );
+  return { getRunScrollTop, isRefreshing, onRunScrollTopChange, recordLoad: visibleRecordLoad };
 }

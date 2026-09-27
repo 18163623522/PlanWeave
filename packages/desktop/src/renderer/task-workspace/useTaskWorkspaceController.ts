@@ -650,6 +650,7 @@ export function useTaskWorkspaceController(options: {
   );
   const {
     getRunScrollTop,
+    isRefreshing: isRecordRefreshing,
     onRunScrollTopChange,
     recordLoad: visibleRecordLoad
   } = useTaskWorkspaceRecordCache({
@@ -689,6 +690,7 @@ export function useTaskWorkspaceController(options: {
   const selectedRecord =
     visibleRecordLoad.key === selectedRecordKey ? visibleRecordLoad.record : null;
   const cliPollKey =
+    !isRecordRefreshing &&
     selectedRun?.item.run.metadata.runnerKind === "cli" &&
     selectedRun.item.active &&
     (selectedRecord?.finishedAt === null || visibleRecordLoad.status === "error")

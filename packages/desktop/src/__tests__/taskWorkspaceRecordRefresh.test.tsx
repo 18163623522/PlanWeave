@@ -10,6 +10,8 @@ import { TaskWorkspaceConversation } from "../renderer/task-workspace/conversati
 import { useTaskWorkspaceRecordCache } from "../renderer/task-workspace/useTaskWorkspaceRecordCache";
 import { deferred } from "./helpers/desktopProjectFixtures";
 import { cleanupRendererTestEnvironment } from "./helpers/rendererTestEnvironment";
+import { controllerApi, useControllerHarness } from "./helpers/taskWorkspaceControllerHarness";
+import { runItems } from "./helpers/taskWorkspaceControllerModelFixture";
 import {
   conversationProps,
   record,
@@ -196,5 +198,114 @@ describe("Task Workspace selected record background refresh", () => {
     await screen.findByRole("heading", { name: "Recovered report" });
     expect(screen.getByTestId("task-workspace-cli-run")).toBe(viewport);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("Task Workspace CLI polling with slow detail reads", () => {
+  it.each([
+    false,
+    true
+  ])("finishes a 3-second read without overlapping polls (first refresh fails: %s)", async (failFirstRefresh) => {
+    vi.useFakeTimers();
+    const { api } = controllerApi({ readModel: () => null });
+    api.listTaskWorkspaceRuns.mockResolvedValue({
+      version: "planweave.task-workspace-runs-page/v1",
+      projectRoot: "/projects/demo",
+      canvasId: "canvas-main",
+      taskId: "T-001",
+      limit: 50,
+      items: runItems(recordId).map((item) =>
+        item.run.record.recordId === recordId ? { ...item, ...selected.item } : item
+      ),
+      nextCursor: null
+    });
+    let reads = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const initialDetail = await api.getTaskWorkspaceRunDetail({ recordId });
+    api.getTaskWorkspaceRunDetail.mockClear();
+    const cliDetail = {
+      ...initialDetail,
+      item: { ...initialDetail.item, active: true, run: selected.item.run },
+      record: record(null, { displayMarkdown: "# Initial output" })
+    };
+    api.getTaskWorkspaceRunDetail.mockImplementation(async () => {
+      const readNumber = ++reads;
+      if (readNumber === 1) return cliDetail;
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 3_000));
+        if (failFirstRefresh && readNumber === 2) throw new Error("Slow detail read failed");
+        const terminal = {
+          ...cliDetail,
+          record: { ...cliDetail.record, displayMarkdown: "# Terminal report" }
+        };
+        const finishedAt = "2026-07-13T00:01:00.000Z";
+        return {
+          ...terminal,
+          item: {
+            ...terminal.item,
+            active: false,
+            run: {
+              ...terminal.item.run,
+              metadata: { ...terminal.item.run.metadata, exitCode: 0 },
+              duration: { ...terminal.item.run.duration, finishedAt }
+            }
+          },
+          record: { ...terminal.record, finishedAt, reportPath: "/report.md" }
+        };
+      } finally {
+        inFlight--;
+      }
+    });
+    const terminalApi = {
+      detectTerminalApps: vi.fn(async () => []),
+      getTerminalPreferences: vi.fn(async () => ({ defaultTerminalAppId: null }))
+    };
+    function Reader() {
+      const controller = useControllerHarness(api);
+      return (
+        <TaskWorkspaceConversation
+          {...controller}
+          canvasRef={{ projectRoot: "/projects/demo", canvasId: "canvas-main" }}
+          api={terminalApi}
+          t={t}
+        />
+      );
+    }
+    async function advance(milliseconds: number) {
+      for (let elapsed = 0; elapsed < milliseconds; elapsed += 500) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(500);
+        });
+      }
+    }
+    render(<Reader />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("heading", { name: "Initial output" })).toBeInTheDocument();
+    const viewport = screen.getByTestId("task-workspace-cli-run");
+    const stderr = screen.getByText("real stderr summary").closest("details")!;
+    viewport.scrollTop = 240;
+    stderr.open = true;
+    await advance(5_500);
+    if (failFirstRefresh) {
+      expect(screen.getByRole("alert")).toHaveTextContent("Slow detail read failed");
+      expect(screen.getByRole("heading", { name: "Initial output" })).toBeInTheDocument();
+      await advance(5_500);
+    }
+    expect(screen.getByRole("heading", { name: "Terminal report" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("task-workspace-cli-run")).toBe(viewport);
+    expect(viewport.scrollTop).toBe(240);
+    expect(stderr.open).toBe(true);
+    expect(terminalApi.detectTerminalApps).toHaveBeenCalledOnce();
+    expect(maxInFlight).toBe(1);
+    const completedReads = reads;
+    await advance(10_000);
+    expect(reads).toBe(completedReads);
+    expect(reads).toBe(failFirstRefresh ? 3 : 2);
   });
 });
