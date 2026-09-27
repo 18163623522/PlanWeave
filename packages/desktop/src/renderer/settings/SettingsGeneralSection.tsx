@@ -20,6 +20,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { AppUpdateSettingsRow } from "./AppUpdateSettingsRow";
 import { CliInstallationCard } from "./CliInstallationCard";
+import { Switch } from "@/components/ui/switch";
 import { SettingsSwitchRow } from "../components/SettingsSwitchRow";
 import type { createTranslator, Language } from "../i18n";
 import type { AppearanceMode, DesktopSettingsUpdate, DesktopUiSettings } from "../types";
@@ -294,21 +295,31 @@ export function SettingsGeneralSection({
         ))}
       </SettingGroup>
       <SettingGroup title={t("executionSettings")}>
-        <SettingsSwitchRow
-          checked={runtimeTools.tmux.available && settings.execution.tmuxMonitoring}
-          disabled={!runtimeTools.tmux.available}
-          title={t("tmuxMonitoring")}
-          description={
-            runtimeTools.tmux.available
-              ? t("tmuxMonitoringHint")
-              : t("tmuxMonitoringUnavailableHint")
-          }
-          onCheckedChange={(checked) => updateSettings({ execution: { tmuxMonitoring: checked } })}
-        />
-        <div className="flex justify-end border-b border-border/80 px-5 py-3 last:border-b-0">
-          <Button size="sm" variant="outline" onClick={() => void refreshRuntimeTools()}>
-            {t("refreshRuntimeTools")}
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+          <div className="min-w-0 flex-1 basis-64">
+            <label htmlFor="tmux-monitoring" className="text-sm font-semibold">
+              {t("tmuxMonitoring")}
+            </label>
+            <p className="mt-1 text-sm text-text-muted">
+              {t(
+                runtimeTools.tmux.available ? "tmuxMonitoringHint" : "tmuxMonitoringUnavailableHint"
+              )}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-4">
+            <Button size="sm" variant="outline" onClick={() => void refreshRuntimeTools()}>
+              {t("refreshRuntimeTools")}
+            </Button>
+            <Switch
+              id="tmux-monitoring"
+              aria-label={t("tmuxMonitoring")}
+              checked={runtimeTools.tmux.available && settings.execution.tmuxMonitoring}
+              disabled={!runtimeTools.tmux.available}
+              onCheckedChange={(checked) =>
+                updateSettings({ execution: { tmuxMonitoring: checked } })
+              }
+            />
+          </div>
         </div>
       </SettingGroup>
       <SettingGroup title={t("promptSettings")}>
