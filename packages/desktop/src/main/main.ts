@@ -1,4 +1,7 @@
-import { app, BrowserWindow, safeStorage } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, safeStorage } from "electron";
+import { detectCliInstallation } from "./cliInstallation.js";
+import { cliInstallCommand } from "../shared/cliInstallation.js";
+import { cliInstallationInvokeChannels } from "../shared/ipcChannels.js";
 import { shutdownDesktopAutoRuns } from "@planweave-ai/runtime";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -137,6 +140,10 @@ function startDesktopApplication(): void {
       registerRuntimeStateWatchHandlers();
       registerWindowAppearanceHandlers();
       registerAppUpdateHandlers();
+      ipcMain.handle(cliInstallationInvokeChannels.detect, () => detectCliInstallation());
+      ipcMain.handle(cliInstallationInvokeChannels.copyInstallCommand, () =>
+        clipboard.writeText(cliInstallCommand)
+      );
       registerCredentialStorageSettingsHandlers({
         store: credentialStoragePreferenceStore,
         activeMode: activeCredentialStorageMode,

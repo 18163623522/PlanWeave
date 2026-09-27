@@ -1,4 +1,9 @@
 import { invokeDesktopCommand } from "./invokeDesktopCommand.js";
+import {
+  cliInstallationSchema,
+  type PlanWeaveCliInstallationApi
+} from "../shared/cliInstallation.js";
+import { cliInstallationInvokeChannels } from "../shared/ipcChannels.js";
 import { contextBridge, ipcRenderer } from "electron";
 import { exposeCollaborationCapture } from "./collaborationCapture.js";
 import type { IpcRendererEvent } from "electron";
@@ -190,6 +195,15 @@ const api: DesktopBridgeApi = {
 };
 
 contextBridge.exposeInMainWorld("planweave", api);
+
+const cliInstallationApi: PlanWeaveCliInstallationApi = {
+  detect: async () =>
+    cliInstallationSchema.parse(await ipcRenderer.invoke(cliInstallationInvokeChannels.detect)),
+  copyInstallCommand: async () => {
+    await ipcRenderer.invoke(cliInstallationInvokeChannels.copyInstallCommand);
+  }
+};
+contextBridge.exposeInMainWorld("planweaveCliInstallation", cliInstallationApi);
 
 const workspaceExecutionApi = createWorkspaceExecutionPreloadApi((channel, input) =>
   ipcRenderer.invoke(channel, input)

@@ -304,6 +304,8 @@
         "workspaceTabsLazyRoutes.test.tsx"
       ],
       "integration": [
+        "cliInstallation.test.ts",
+        "cliInstallationCard.test.tsx",
         "acpDesktopMockE2E.test.tsx",
         "appUpdateHandlers.test.ts",
         "buildMetadata.test.ts",

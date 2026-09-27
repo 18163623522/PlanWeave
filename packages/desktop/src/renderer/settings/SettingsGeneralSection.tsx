@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AppUpdateSettingsRow } from "./AppUpdateSettingsRow";
+import { CliInstallationCard } from "./CliInstallationCard";
 import { SettingsSwitchRow } from "../components/SettingsSwitchRow";
 import type { createTranslator, Language } from "../i18n";
 import type { AppearanceMode, DesktopSettingsUpdate, DesktopUiSettings } from "../types";
@@ -257,6 +258,7 @@ export function SettingsGeneralSection({
           />
         </Field>
       </SettingGroup>
+      <CliInstallationCard t={t} />
       <SettingGroup title={t("notificationRules")}>
         {[
           { key: "autoRunFailure", label: t("notifyAutoRun"), description: t("notifyAutoRunHint") },

@@ -159,3 +159,7 @@ export const autoRunChangedChannel = "planweave:autoRunChanged";
 export const runnerRecordSubscribeChannel = "planweave:runnerRecordSubscribe";
 export const runnerRecordUnsubscribeChannel = "planweave:runnerRecordUnsubscribe";
 export const runnerRecordEventChannel = "planweave:runnerRecordEvent";
+export const cliInstallationInvokeChannels = {
+  detect: "planweave-cli:detectInstallation",
+  copyInstallCommand: "planweave-cli:copyInstallCommand"
+} as const;

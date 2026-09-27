@@ -1,4 +1,5 @@
 import type { DesktopBridgeApi } from "@planweave-ai/runtime";
+import type { PlanWeaveCliInstallationApi } from "../shared/cliInstallation";
 import type { CollaborationCaptureApi } from "../shared/collaborationCapture";
 import type { PlanWeaveAppUpdateApi } from "../shared/appUpdate";
 import type { PlanWeaveCollaborationApi } from "../shared/collaboration";
@@ -12,6 +13,7 @@ import type { PlanWeaveWorkspaceExecutionApi } from "../shared/workspaceExecutio
 declare global {
   interface Window {
     planweave: DesktopBridgeApi;
+    planweaveCliInstallation?: PlanWeaveCliInstallationApi;
     planweaveAppUpdate?: PlanWeaveAppUpdateApi;
     planweaveCollaboration?: PlanWeaveCollaborationApi;
     planweaveCollaborationCapture?: CollaborationCaptureApi;
