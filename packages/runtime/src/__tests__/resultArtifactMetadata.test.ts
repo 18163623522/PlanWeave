@@ -217,7 +217,7 @@ describe("feedback submission metadata contract", () => {
 });
 
 describe("persisted artifact reuse via trusted contracts", () => {
-  it("reuses a persisted implementation run without creating a duplicate", async () => {
+  it("rejects an unidentified persisted implementation run for a new claim", async () => {
     const { root, init } = await createTestWorkspace();
     await claimNext({ projectRoot: root });
     const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
@@ -234,12 +234,15 @@ describe("persisted artifact reuse via trusted contracts", () => {
       sourceReportPath: "/tmp/original-report.md"
     });
 
-    const reused = await submitBlockResult({
+    const retry = {
       projectRoot: root,
       ref: "T-001#B-001",
       reportPath: await writeReport(root, "retry.md", "report\n")
-    });
-    expect(reused).toEqual({ ref: "T-001#B-001", runId: "RUN-001", status: "completed" });
+    };
+    await expect(submitBlockResult(retry)).rejects.toThrow("identity is ambiguous");
+    await expect(submitBlockResult({ ...retry, runId: "RUN-001" })).rejects.toThrow(
+      "identity is ambiguous"
+    );
     await expect(access(join(runRoot, "RUN-002"))).rejects.toThrow();
   });
 

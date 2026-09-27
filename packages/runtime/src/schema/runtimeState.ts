@@ -18,15 +18,20 @@ const taskStateSchema = z
   })
   .strict();
 
+export const submissionRunIdSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => !value.startsWith(".") && !/[/\\\0]/.test(value) && !/^[A-Za-z]:/.test(value),
+    "Submission runId must be a non-hidden single directory name."
+  );
+
 export const blockStateSchema = z
   .object({
     status: z.enum(blockStatuses),
     lastRunId: z.string().nullable().optional(),
     submissionAttemptId: z.string().min(1).optional(),
-    submissionRunId: z
-      .string()
-      .regex(/^RUN-\d+$/)
-      .optional(),
+    submissionRunId: submissionRunIdSchema.optional(),
     latestReviewAttemptId: z.string().nullable().optional(),
     activeFeedbackId: z.string().nullable().optional(),
     pendingFeedbackId: z.string().nullable().optional(),

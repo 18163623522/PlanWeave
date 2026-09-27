@@ -157,7 +157,7 @@ describe("basic Plan Package README workflow", () => {
         steps: Array<{
           kind: string;
           claim: { ref: string };
-          adapterResult: { promptPath: string };
+          adapterResult: { promptPath: string; runId: string };
         }>;
       }>((await runCli(["run", "--once", "--executor", "manual", "--json"], env)).stdout);
       expect(manualRun).toMatchObject({
@@ -180,7 +180,10 @@ describe("basic Plan Package README workflow", () => {
 
       const implementation = join(home, "implementation-1.md");
       await writeFile(implementation, "First implementation.\n", "utf8");
-      await runCli(["submit-result", "T-001#B-001", "--report", implementation], env);
+      const submitted = parseJson<{ runId: string }>(
+        (await runCli(["submit-result", "T-001#B-001", "--report", implementation], env)).stdout
+      );
+      expect(submitted.runId).toBe(manualRun.steps[0]?.adapterResult.runId);
 
       expect(
         parseJson<{ kind: string; ref: string }>((await runCli(["claim-next"], env)).stdout)

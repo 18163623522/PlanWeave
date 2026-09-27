@@ -111,6 +111,9 @@ describe("planweave CLI help and schema output", () => {
     expect(formatSchemaHelp("state")).toContain("canonical remoteExecution projection");
     expect(formatSchemaHelp("state")).toContain("Runtime-derived actionRequired");
     expect(formatSchemaHelp("state")).toContain(
+      "non-hidden single directory name (for example RUN-001 or RUN-REPORT-LATER)"
+    );
+    expect(formatSchemaHelp("state")).toContain(
       "normalize every other unknown wire code to remote_execution_failed"
     );
     expect(formatSchemaHelp("state")).toContain("report_output_missing");

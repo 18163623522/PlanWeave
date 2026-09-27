@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { optionalReaddir, optionalStat } from "../fs/optionalFile.js";
 import { z } from "zod";
 import { artifactReferenceSchema } from "../autoRun/runnerContractSchemas.js";
 import { readJsonFile } from "../json.js";
@@ -21,6 +23,7 @@ export const implementationRunMetadataSchema = z
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
     submissionAttemptId: z.string().min(1).optional(),
+    executionAdmittedAt: z.string().min(1).nullable().optional(),
     submittedAt: z.string().min(1).optional(),
     startedAt: z.union([z.string().min(1), z.null()]).optional(),
     finishedAt: z.union([z.string().min(1), z.null()]).optional(),
@@ -76,4 +79,19 @@ export async function readImplementationRunMetadataFile(
     throw error;
   }
   return parseImplementationRunMetadata(raw, metadataPath);
+}
+
+export async function findAttemptRun(runRoot: string, attemptId: string): Promise<string | null> {
+  const entries = await optionalReaddir(runRoot, { withFileTypes: true });
+  const matches: string[] = [];
+  for (const entry of entries ?? []) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const metadataPath = join(runRoot, entry.name, "metadata.json");
+    if ((await optionalStat(metadataPath)) === null) continue;
+    const metadata = await readImplementationRunMetadataFile(metadataPath);
+    if (metadata.submissionAttemptId === attemptId) matches.push(entry.name);
+  }
+  if (matches.length > 1)
+    throw new Error("Multiple RUN records belong to the same submission attempt.");
+  return matches[0] ?? null;
 }

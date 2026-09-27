@@ -1,11 +1,17 @@
 import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
-import { mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { optionalReaddir, optionalStat } from "../fs/optionalFile.js";
 import { parseBlockRef } from "../graph/compileTaskGraph.js";
 import { writeJsonFile } from "../json.js";
 import { loadPackage } from "../package/loadPackage.js";
+import { withCanvasLock } from "../fs/withCanvasLock.js";
+import {
+  findAttemptRun,
+  readImplementationRunMetadataFile
+} from "../taskManager/implementationRunMetadata.js";
+import { readState } from "../state.js";
 import {
   DEFAULT_PROCESS_TREE_GRACE_MS,
   spawnManagedProcess,
@@ -35,6 +41,15 @@ export { ExecutorCancelledError, isExecutorCancelledError } from "./executorCanc
 
 export type BlockClaim = Extract<ClaimResult, { kind: "block" }>;
 export type FeedbackClaim = Extract<ClaimResult, { kind: "feedback" }>;
+
+export class ExecutorAlreadyAdmittedError extends Error {
+  constructor(readonly runId: string) {
+    super(
+      `Automatic execution for '${runId}' is already admitted; reclaim before starting a new execution.`
+    );
+    this.name = "ExecutorAlreadyAdmittedError";
+  }
+}
 
 export const DEFAULT_EXECUTOR_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_EXECUTOR_MAX_STDOUT_BYTES = 10 * 1024 * 1024;
@@ -337,35 +352,115 @@ export async function prepareBlockRun(options: {
 }> {
   const { workspace } = await loadPackage(options.projectRoot);
   const { taskId, blockId } = parseBlockRef(options.claim.ref);
-  const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
-  const runId = await allocateRunId(runRoot);
-  const runDir = join(runRoot, runId);
-  const promptPath = join(runDir, "prompt.md");
-  const metadataPath = join(runDir, "metadata.json");
-  const startedAt = new Date().toISOString();
-  await writeFile(promptPath, options.prompt, "utf8");
-  await writeJsonFile(metadataPath, {
-    runId,
-    ref: options.claim.ref,
-    taskId,
-    blockId,
-    executor: options.executorName,
-    adapter: options.adapter,
-    agentId: options.profile.adapter === "agent" ? options.profile.agent : null,
-    runnerKind: options.profile.adapter === "agent" ? options.profile.runner.transport : null,
-    executionHost:
-      options.profile.adapter === "agent" ? executorProfileExecutionHost(options.profile) : null,
-    projectRoot: workspace.rootPath,
-    executionCwd: workspaceExecutionCwd(workspace),
-    startedAt,
-    ...(options.executionWaveId ? { executionWaveId: options.executionWaveId } : {}),
-    finishedAt: null,
-    exitCode: null,
-    agentSessionId: null,
-    codexSessionId: null
+  const submissionAttemptId =
+    options.claim.blockType === "implementation" ? options.claim.submissionAttemptId : undefined;
+  return withCanvasLock(dirname(workspace.stateFile), async () => {
+    if (submissionAttemptId !== undefined) {
+      const state = await readState(workspace.stateFile);
+      const current = state.blocks[options.claim.ref];
+      if (
+        current?.status !== "in_progress" ||
+        current.submissionAttemptId !== submissionAttemptId
+      ) {
+        throw new Error(
+          `Executor claim '${options.claim.ref}' attempt conflicts with current state.`
+        );
+      }
+    }
+    const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
+    const existingRunId = submissionAttemptId
+      ? await findAttemptRun(runRoot, submissionAttemptId)
+      : null;
+    if (existingRunId) {
+      const runDir = join(runRoot, existingRunId);
+      const metadataPath = join(runDir, "metadata.json");
+      const metadata = await readImplementationRunMetadataFile(metadataPath);
+      if (
+        metadata.ref !== options.claim.ref ||
+        metadata.taskId !== taskId ||
+        metadata.blockId !== blockId ||
+        metadata.runId !== existingRunId ||
+        metadata.executor !== options.executorName ||
+        metadata.adapter !== options.adapter ||
+        typeof metadata.startedAt !== "string"
+      ) {
+        throw new Error(
+          `Prepared run '${existingRunId}' identity conflicts with executor preparation.`
+        );
+      }
+      if (
+        options.adapter !== "manual" &&
+        (metadata.executionAdmittedAt !== null || metadata.command !== undefined)
+      ) {
+        throw new ExecutorAlreadyAdmittedError(existingRunId);
+      }
+      const promptPath = join(runDir, "prompt.md");
+      if (!(await pathExists(promptPath))) await writeFile(promptPath, options.prompt, "utf8");
+      await recordBlockRunInIndex(runRoot, existingRunId);
+      if (options.adapter !== "manual") {
+        await finishRunMetadata(metadataPath, { executionAdmittedAt: new Date().toISOString() });
+      }
+      return {
+        runId: existingRunId,
+        runDir,
+        promptPath,
+        metadataPath,
+        startedAt: metadata.startedAt
+      };
+    }
+    const runId = await allocateRunId(runRoot);
+    const runDir = join(runRoot, runId);
+    const promptPath = join(runDir, "prompt.md");
+    const metadataPath = join(runDir, "metadata.json");
+    const startedAt = new Date().toISOString();
+    try {
+      await writeJsonFile(metadataPath, {
+        runId,
+        ...(submissionAttemptId !== undefined ? { submissionAttemptId } : {}),
+        ...(options.adapter !== "manual" ? { executionAdmittedAt: null } : {}),
+        ref: options.claim.ref,
+        taskId,
+        blockId,
+        executor: options.executorName,
+        adapter: options.adapter,
+        agentId: options.profile.adapter === "agent" ? options.profile.agent : null,
+        runnerKind: options.profile.adapter === "agent" ? options.profile.runner.transport : null,
+        executionHost:
+          options.profile.adapter === "agent"
+            ? executorProfileExecutionHost(options.profile)
+            : null,
+        projectRoot: workspace.rootPath,
+        executionCwd: workspaceExecutionCwd(workspace),
+        startedAt,
+        ...(options.executionWaveId ? { executionWaveId: options.executionWaveId } : {}),
+        finishedAt: null,
+        exitCode: null,
+        agentSessionId: null,
+        codexSessionId: null
+      });
+    } catch (error) {
+      try {
+        await rmdir(runDir);
+      } catch (cleanupError) {
+        if (!(error instanceof Error))
+          throw new AggregateError(
+            [error, cleanupError],
+            "Preparation and empty-directory cleanup failed."
+          );
+        error.cause =
+          error.cause === undefined
+            ? cleanupError
+            : new AggregateError([error.cause, cleanupError], "Preparation cleanup failed.");
+      }
+      throw error;
+    }
+    await writeFile(promptPath, options.prompt, "utf8");
+    await recordBlockRunInIndex(runRoot, runId);
+    if (options.adapter !== "manual") {
+      await finishRunMetadata(metadataPath, { executionAdmittedAt: new Date().toISOString() });
+    }
+    return { runId, runDir, promptPath, metadataPath, startedAt };
   });
-  await recordBlockRunInIndex(runRoot, runId);
-  return { runId, runDir, promptPath, metadataPath, startedAt };
 }
 
 export async function finishRunMetadata(

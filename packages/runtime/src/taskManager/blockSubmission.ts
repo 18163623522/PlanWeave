@@ -16,6 +16,7 @@ import { parseBlockRef } from "../graph/compileTaskGraph.js";
 import { writeJsonFile } from "../json.js";
 import { loadPackage } from "../package/loadPackage.js";
 import { writeState } from "../state.js";
+import { submissionRunIdSchema } from "../schema/runtimeState.js";
 import type {
   BlockState,
   ExecutionGraphSession,
@@ -23,6 +24,7 @@ import type {
   SubmitResult
 } from "../types.js";
 import {
+  findAttemptRun,
   readImplementationRunMetadataFile,
   type ImplementationRunMetadata
 } from "./implementationRunMetadata.js";
@@ -103,21 +105,6 @@ async function runHasSubmittedResult(
   return true;
 }
 
-async function findAttemptRun(runRoot: string, attemptId: string): Promise<string | null> {
-  const entries = await optionalReaddir(runRoot, { withFileTypes: true });
-  const matches: string[] = [];
-  for (const entry of entries ?? []) {
-    if (!entry.isDirectory() || !/^RUN-\d+$/.test(entry.name)) continue;
-    const metadataPath = join(runRoot, entry.name, "metadata.json");
-    if (!(await exists(metadataPath))) continue;
-    const metadata = await readImplementationRunMetadataFile(metadataPath);
-    if (metadata.submissionAttemptId === attemptId) matches.push(entry.name);
-  }
-  if (matches.length > 1)
-    throw new Error("Multiple RUN records belong to the same submission attempt.");
-  return matches[0] ?? null;
-}
-
 async function resolveSubmissionRun(options: {
   runRoot: string;
   blockState: BlockState;
@@ -146,12 +133,12 @@ async function resolveSubmissionRun(options: {
   if (!candidateRunId && local && blockState.status === "in_progress") {
     const entries = await optionalReaddir(runRoot, { withFileTypes: true });
     for (const entry of entries ?? []) {
-      if (!entry.isDirectory() || !/^RUN-\d+$/.test(entry.name)) continue;
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
       const path = join(runRoot, entry.name, "metadata.json");
       if (!(await exists(path))) {
         if (entry.name !== blockState.lastRunId) {
           throw new Error(
-            `Submission identity is ambiguous for incomplete run '${entry.name}'; retry with an explicit runId after confirming its claim.`
+            `Submission identity is ambiguous for incomplete run '${entry.name}'; its owning claim must be proven before retrying.`
           );
         }
         continue;
@@ -159,7 +146,7 @@ async function resolveSubmissionRun(options: {
       const metadata = await readImplementationRunMetadataFile(path);
       if (!metadata.submissionAttemptId && entry.name !== blockState.lastRunId) {
         throw new Error(
-          `Submission identity is ambiguous for legacy run '${entry.name}'; retry with an explicit runId after confirming its claim.`
+          `Submission identity is ambiguous for legacy run '${entry.name}'; its owning claim must be proven before retrying.`
         );
       }
     }
@@ -194,12 +181,22 @@ async function resolveSubmissionRun(options: {
     }
     if (
       !candidateMetadata.submissionAttemptId &&
+      blockState.status === "in_progress" &&
+      candidateDirectoryExists &&
+      reservedRunId !== candidateRunId
+    ) {
+      throw new Error(
+        `Submission identity is ambiguous for legacy run '${candidateRunId}'; its owning claim must have a persisted reservation before retrying.`
+      );
+    }
+    if (
+      !candidateMetadata.submissionAttemptId &&
       candidateMetadata.reportHash &&
       blockState.status === "in_progress" &&
       candidateRunId === blockState.lastRunId
     ) {
       throw new Error(
-        `Submission identity is ambiguous for historical run '${candidateRunId}'; use a new runId for this claim.`
+        `Submission identity is ambiguous for historical run '${candidateRunId}'; prepare a new execution for this claim before submitting.`
       );
     }
   }
@@ -214,6 +211,7 @@ export async function submitBlockResult(options: {
   ref: string;
   reportPath: string;
   runId?: string;
+  submissionAttemptId?: string;
   session?: ExecutionGraphSession;
 }): Promise<SubmitResult> {
   return submitBlockResultFromBytes(options, await readFile(options.reportPath));
@@ -225,6 +223,7 @@ export async function submitBlockResultFromBytes(
     ref: string;
     reportPath: string;
     runId?: string;
+    submissionAttemptId?: string;
     session?: ExecutionGraphSession;
   },
   reportBytes: Buffer
@@ -238,6 +237,7 @@ export async function submitVerifiedBlockResult(
     ref: string;
     reportPath: string;
     runId?: string;
+    submissionAttemptId?: string;
     session?: ExecutionGraphSession;
   },
   artifact: { reference: ArtifactReference; bytes: Buffer },
@@ -329,6 +329,7 @@ async function submitBlockResultArtifact(
     ref: string;
     reportPath?: string;
     runId?: string;
+    submissionAttemptId?: string;
     session?: ExecutionGraphSession;
   },
   artifact: BlockSubmissionArtifact,
@@ -428,8 +429,15 @@ async function submitBlockResultArtifact(
     ) {
       throw new Error(`Block '${options.ref}' must be in_progress before submit-result.`);
     }
-    if (options.runId && !/^RUN-\d+$/.test(options.runId)) {
-      throw new Error("Submission runId must be a RUN-NNN identifier.");
+    if (
+      authority.kind === "local" &&
+      options.submissionAttemptId !== undefined &&
+      blockState.submissionAttemptId !== options.submissionAttemptId
+    ) {
+      throw new Error(`Executor claim '${options.ref}' attempt conflicts with current submission.`);
+    }
+    if (options.runId !== undefined && !submissionRunIdSchema.safeParse(options.runId).success) {
+      throw new Error("Submission runId must be a non-hidden single directory name.");
     }
     const runRoot = join(workspace.resultsDir, taskId, "blocks", blockId, "runs");
     const attemptId =

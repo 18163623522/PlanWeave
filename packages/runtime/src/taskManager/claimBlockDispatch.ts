@@ -60,11 +60,13 @@ export async function claimDispatchedBlock(options: {
     state.blocks[options.ref] = claimedBlockState(state.blocks[options.ref], block.type);
     state.currentRefs = withCurrentRef(state.currentRefs, options.ref);
     await writeState(lockedWorkspace.stateFile, refreshDerivedState(manifest, state));
-    return claimResultForBlock(
+    const result = claimResultForBlock(
       options.ref,
       graph,
       "dispatched",
       manifest.execution.defaultExecutor
     );
+    if (result.kind !== "block") throw new Error(`Expected block claim for '${options.ref}'.`);
+    return { ...result, submissionAttemptId: state.blocks[options.ref].submissionAttemptId };
   });
 }

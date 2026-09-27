@@ -64,7 +64,7 @@ describe("claimNext", () => {
   });
 
   it("returns JSON block claims in execution order", async () => {
-    const { root } = await createTestWorkspace();
+    const { root, init } = await createTestWorkspace();
 
     const first = await claimNext({ projectRoot: root });
 
@@ -75,7 +75,17 @@ describe("claimNext", () => {
       blockId: "B-001",
       blockType: "implementation",
       effectiveExecutor: "default",
+      submissionAttemptId: expect.any(String),
       reason: "claimed"
+    });
+    if (first.kind !== "block") throw new Error("Expected block claim");
+    expect(first.submissionAttemptId).toBe(
+      (await readState(init.workspace.stateFile)).blocks[first.ref].submissionAttemptId
+    );
+    expect(await claimNext({ projectRoot: root })).toMatchObject({
+      ref: first.ref,
+      submissionAttemptId: first.submissionAttemptId,
+      reason: "current"
     });
   });
 
@@ -230,6 +240,7 @@ describe("claimNext", () => {
     expect(await claimNext({ projectRoot: root, parallel: true })).toEqual({
       kind: "batch",
       refs: ["T-002#B-001", "T-001#R-001"],
+      submissionAttemptIds: { "T-002#B-001": expect.any(String) },
       effectiveExecutors: {
         "T-002#B-001": "default",
         "T-001#R-001": "default"

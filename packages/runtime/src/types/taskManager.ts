@@ -13,6 +13,8 @@ export type ClaimResult =
       blockId: string;
       blockType: BlockType;
       effectiveExecutor: string;
+      /** Durable implementation identity; may be absent for review, dry-run and legacy claims. */
+      submissionAttemptId?: string;
       reason?: "claimed" | "current" | "feedback_resolved" | "dispatched";
       requestedMode?: "parallel";
       parallelFallbackReason?: "review_requires_sequential_claim";
@@ -30,6 +32,8 @@ export type ClaimResult =
       kind: "batch";
       refs: string[];
       effectiveExecutors: Record<string, string>;
+      /** Implementation attempt identities captured by the claim transaction. */
+      submissionAttemptIds?: Record<string, string>;
       /** Present when maxConcurrent is already filled by live in_progress work. */
       reason?: "at_capacity";
     }

@@ -35,6 +35,104 @@ import { prepareBlockRun } from "../autoRun/executorShared.js";
 import { createTestWorkspace, writeReport } from "./promptTestHelpers.js";
 
 describe("submitBlockResult", () => {
+  it.each([
+    "",
+    "../outside",
+    "RUN\\outside",
+    ".internal",
+    "C:outside"
+  ])("rejects an unsafe submission directory identity (%s) before reserving a run", async (runId) => {
+    const { root, init } = await createTestWorkspace();
+    const ref = "T-001#B-001";
+    await claimNext({ projectRoot: root });
+    const before = (await readState(init.workspace.stateFile)).blocks[ref];
+    await expect(
+      submitBlockResult({
+        projectRoot: root,
+        ref,
+        runId,
+        reportPath: await writeReport(root, "unsafe.md")
+      })
+    ).rejects.toThrow("single directory name");
+    expect((await readState(init.workspace.stateFile)).blocks[ref]).toEqual(before);
+    await expect(
+      access(join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs", "RUN-001"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("submits a prepared manual claim without runId into the same RUN and counts it once", async () => {
+    const { root, init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("Expected block claim");
+    const run = await prepareBlockRun({
+      projectRoot: root,
+      claim,
+      executorName: "manual",
+      adapter: "manual",
+      profile: { adapter: "manual" },
+      prompt: "manual implementation"
+    });
+    const options = {
+      projectRoot: root,
+      ref: claim.ref,
+      reportPath: await writeReport(root, "manual-prepared.md")
+    };
+    const result = await submitBlockResult(options);
+    expect(result.runId).toBe(run.runId);
+    expect(await submitBlockResult(options)).toEqual(result);
+    expect(
+      (await readdir(join(run.runDir, ".."))).filter((name) => /^RUN-\d+$/.test(name))
+    ).toEqual([run.runId]);
+    const blockIndex = await readBlockRunIndexView(join(run.runDir, ".."), { limit: 10 });
+    expect(blockIndex.entries.map((entry) => entry.runId)).toEqual([run.runId]);
+    expect(blockIndex.latestArtifact?.runId).toBe(run.runId);
+    expect(await readJsonFile(run.metadataPath)).toMatchObject({
+      ref: claim.ref,
+      runId: run.runId,
+      executor: "manual",
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks[claim.ref]
+        .submissionAttemptId
+    });
+    expect(
+      await readJsonFile(join(init.workspace.resultsDir, "T-001", "index.json"))
+    ).toMatchObject({
+      latestRunByBlock: { [claim.ref]: run.runId },
+      counts: { runs: 1 }
+    });
+  });
+
+  it("does not attach a stale executor claim to a newly claimed submission attempt", async () => {
+    const { root, init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("Expected block claim");
+    await markBlockDiverged({ projectRoot: root, ref: claim.ref, reason: "superseded executor" });
+    await resolveBlockDivergence({ projectRoot: root, ref: claim.ref, reason: "retry work" });
+    const current = await claimNext({
+      projectRoot: root,
+      scope: { kind: "block", blockRef: claim.ref }
+    });
+    if (current.kind !== "block") throw new Error("Expected current block claim");
+    const before = await readFile(init.workspace.stateFile, "utf8");
+    const preparation = {
+      projectRoot: root,
+      claim,
+      executorName: "manual",
+      adapter: "manual" as const,
+      profile: { adapter: "manual" as const },
+      prompt: "stale executor"
+    };
+    await expect(prepareBlockRun(preparation)).rejects.toThrow("attempt conflicts");
+    expect(await readFile(init.workspace.stateFile, "utf8")).toBe(before);
+    const run = await prepareBlockRun({ ...preparation, claim: current });
+    expect(run.runId).toBe("RUN-001");
+    const result = await submitBlockResult({
+      projectRoot: root,
+      ref: claim.ref,
+      reportPath: await writeReport(root, "current.md")
+    });
+    expect(result.runId).toBe(run.runId);
+  });
+
   it("stores implementation reports under the block run history", async () => {
     const { root, init } = await createTestWorkspace();
     await claimNext({ projectRoot: root });
@@ -115,31 +213,44 @@ describe("submitBlockResult", () => {
   it.each([
     undefined,
     "RUN-001"
-  ])("does not overwrite a real executor run allocated while submission reservation is pending (runId=%s)", async (runId) => {
+  ])("rejects executor preparation without overwriting a submission-owned run (runId=%s)", async (runId) => {
     const { root, init } = await createTestWorkspace();
     const ref = "T-001#B-001";
     const claim = await claimNext({ projectRoot: root });
     if (claim.kind !== "block") throw new Error("Expected block claim");
-    let executorRun: Awaited<ReturnType<typeof prepareBlockRun>> | undefined;
-    let executorMetadata: string | undefined;
+    let checkedReservation = false;
+    let reservedMetadata: string | undefined;
     const originalWrite = json.writeJsonFile;
     const spy = vi
       .spyOn(json, "writeJsonFile")
       .mockImplementation(async (path, value, writeOptions) => {
         if (
-          !executorRun &&
+          !checkedReservation &&
           path === init.workspace.stateFile &&
           (value as RuntimeState).blocks[ref].submissionRunId
         ) {
-          executorRun = await prepareBlockRun({
-            projectRoot: root,
-            claim,
-            executorName: "concurrent-executor",
-            adapter: "manual",
-            profile: { adapter: "manual" },
-            prompt: "independent executor evidence"
-          });
-          executorMetadata = await readFile(executorRun.metadataPath, "utf8");
+          checkedReservation = true;
+          const metadataPath = join(
+            init.workspace.resultsDir,
+            "T-001",
+            "blocks",
+            "B-001",
+            "runs",
+            "RUN-001",
+            "metadata.json"
+          );
+          reservedMetadata = await readFile(metadataPath, "utf8");
+          await expect(
+            prepareBlockRun({
+              projectRoot: root,
+              claim,
+              executorName: "concurrent-executor",
+              adapter: "manual",
+              profile: { adapter: "manual" },
+              prompt: "independent executor evidence"
+            })
+          ).rejects.toThrow("identity conflicts with executor preparation");
+          expect(await readFile(metadataPath, "utf8")).toBe(reservedMetadata);
         }
         await originalWrite(path, value, writeOptions);
       });
@@ -154,17 +265,14 @@ describe("submitBlockResult", () => {
     } finally {
       spy.mockRestore();
     }
-    if (!executorRun) throw new Error("Expected competing executor run");
-    expect(result.runId).not.toBe(executorRun.runId);
-    expect(await readFile(executorRun.metadataPath, "utf8")).toBe(executorMetadata);
-    if (executorMetadata === undefined) throw new Error("Expected executor metadata");
-    expect(JSON.parse(executorMetadata)).toMatchObject({
-      executor: "concurrent-executor"
-    });
-    expect(await readFile(executorRun.promptPath, "utf8")).toBe("independent executor evidence");
-    await expect(access(join(executorRun.runDir, "report.md"))).rejects.toMatchObject({
-      code: "ENOENT"
-    });
+    expect(checkedReservation).toBe(true);
+    expect(reservedMetadata).toBeDefined();
+    expect(result.runId).toBe("RUN-001");
+    const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
+    expect((await readdir(runRoot)).filter((name) => !name.startsWith("."))).toEqual(["RUN-001"]);
+    expect(
+      JSON.parse(await readFile(join(runRoot, "RUN-001", "metadata.json"), "utf8"))
+    ).toMatchObject({ submissionAttemptId: claim.submissionAttemptId });
   });
 
   it.each([
@@ -225,13 +333,18 @@ describe("submitBlockResult", () => {
     ).toMatchObject({ latestRunByBlock: { [ref]: "RUN-001" }, counts: { runs: 1 } });
   });
 
-  it("retries the same claim after the initial reservation state write fails", async () => {
+  it.each([
+    undefined,
+    "RUN-REPORT-LATER"
+  ])("retries the same claim after the initial reservation state write fails (runId=%s)", async (explicitRunId) => {
     const { root, init } = await createTestWorkspace();
     const ref = "T-001#B-001";
+    const runId = explicitRunId ?? "RUN-001";
     await claimNext({ projectRoot: root });
     const options = {
       projectRoot: root,
       ref,
+      runId: explicitRunId,
       reportPath: await writeReport(root, "reservation-retry.md")
     };
     const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
@@ -255,27 +368,32 @@ describe("submitBlockResult", () => {
     expect((await readState(init.workspace.stateFile)).blocks[ref]).not.toHaveProperty(
       "submissionRunId"
     );
-    expect(await readJsonFile(join(runRoot, "RUN-001", "metadata.json"))).toMatchObject({
-      runId: "RUN-001",
+    expect(await readJsonFile(join(runRoot, runId, "metadata.json"))).toMatchObject({
+      runId: runId,
       submissionAttemptId: (await readState(init.workspace.stateFile)).blocks[ref]
         .submissionAttemptId
     });
-    const result = await submitBlockResult(options);
-    expect(result).toEqual({ ref, runId: "RUN-001", status: "completed" });
-    expect(await submitBlockResult(options)).toEqual(result);
-    expect((await readdir(runRoot)).filter((name) => /^RUN-\d+$/.test(name))).toEqual(["RUN-001"]);
-    expect(await readFile(join(runRoot, "RUN-001", "report.md"), "utf8")).toBe("report\n");
+    const retryOptions = { projectRoot: root, ref, reportPath: options.reportPath };
+    const result = await submitBlockResult(retryOptions);
+    expect(result).toEqual({ ref, runId: runId, status: "completed" });
+    expect(await submitBlockResult(retryOptions)).toEqual(result);
+    expect(
+      (await readdir(runRoot, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+        .map((entry) => entry.name)
+    ).toEqual([runId]);
+    expect(await readFile(join(runRoot, runId, "report.md"), "utf8")).toBe("report\n");
     const blockIndex = await readBlockRunIndexView(runRoot, { limit: 10 });
-    expect(blockIndex.entries.map((entry) => entry.runId)).toEqual(["RUN-001"]);
-    expect(blockIndex.latestArtifact?.runId).toBe("RUN-001");
+    expect(blockIndex.entries.map((entry) => entry.runId)).toEqual([runId]);
+    expect(blockIndex.latestArtifact?.runId).toBe(runId);
     expect((await readState(init.workspace.stateFile)).blocks[ref]).toMatchObject({
       status: "completed",
-      lastRunId: "RUN-001",
-      submissionRunId: "RUN-001"
+      lastRunId: runId,
+      submissionRunId: runId
     });
     expect(
       await readJsonFile(join(init.workspace.resultsDir, "T-001", "index.json"))
-    ).toMatchObject({ latestRunByBlock: { [ref]: "RUN-001" }, counts: { runs: 1 } });
+    ).toMatchObject({ latestRunByBlock: { [ref]: runId }, counts: { runs: 1 } });
   });
 
   it.each([
@@ -394,6 +512,8 @@ describe("submitBlockResult", () => {
     await mkdir(runDir, { recursive: true });
     await writeFile(join(runDir, "report.md"), "report\n", "utf8");
     await writeJsonFile(join(runDir, "metadata.json"), {
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks["T-001#B-001"]
+        .submissionAttemptId,
       ref: "T-001#B-001",
       taskId: "T-001",
       blockId: "B-001",
@@ -438,6 +558,8 @@ describe("submitBlockResult", () => {
     await mkdir(runDir, { recursive: true });
     await writeFile(join(runDir, "report.md"), "report\n", "utf8");
     await writeJsonFile(join(runDir, "metadata.json"), {
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks["T-001#B-001"]
+        .submissionAttemptId,
       ref: "T-001#B-001",
       taskId: "T-001",
       blockId: "B-001",
@@ -463,10 +585,11 @@ describe("submitBlockResult", () => {
     });
   });
 
-  it("requires explicit identity to recover an ambiguous legacy run", async () => {
+  it("requires a persisted reservation to recover an ambiguous legacy run", async () => {
     const { root, init } = await createTestWorkspace();
     await claimNext({ projectRoot: root });
     const legacyState = await readState(init.workspace.stateFile);
+    const attemptId = legacyState.blocks["T-001#B-001"].submissionAttemptId;
     delete legacyState.blocks["T-001#B-001"].submissionAttemptId;
     await writeState(init.workspace.stateFile, legacyState);
     const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
@@ -492,6 +615,12 @@ describe("submitBlockResult", () => {
       )
     ).toMatchObject({ status: "in_progress", lastRunId: null });
     await expect(access(join(runRoot, "RUN-002"))).rejects.toThrow();
+    await expect(submitBlockResult({ ...options, runId: "RUN-001" })).rejects.toThrow(
+      "identity is ambiguous"
+    );
+    legacyState.blocks[options.ref].submissionAttemptId = attemptId;
+    legacyState.blocks[options.ref].submissionRunId = "RUN-001";
+    await writeState(init.workspace.stateFile, legacyState);
     expect(await submitBlockResult({ ...options, runId: "RUN-001" })).toEqual({
       ref: options.ref,
       runId: "RUN-001",
@@ -560,6 +689,8 @@ describe("submitBlockResult", () => {
     await mkdir(runDir, { recursive: true });
     await writeFile(join(runDir, "report.md"), "runner placeholder\n", "utf8");
     await writeJsonFile(join(runDir, "metadata.json"), {
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks["T-001#B-001"]
+        .submissionAttemptId,
       runId: "RUN-001",
       ref: "T-001#B-001",
       taskId: "T-001",
@@ -603,6 +734,8 @@ describe("submitBlockResult", () => {
     });
     const verified = await readVerifiedArtifactReference({ rootDir: runDir, value: reference });
     await writeJsonFile(join(runDir, "metadata.json"), {
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks["T-001#B-001"]
+        .submissionAttemptId,
       runId: "RUN-001",
       ref: "T-001#B-001",
       taskId: "T-001",
@@ -647,6 +780,8 @@ describe("submitBlockResult", () => {
     });
     const verified = await readVerifiedArtifactReference({ rootDir: runDir, value: reference });
     await writeJsonFile(join(runDir, "metadata.json"), {
+      submissionAttemptId: (await readState(init.workspace.stateFile)).blocks["T-001#B-001"]
+        .submissionAttemptId,
       runId: "RUN-001",
       ref: "T-001#B-001",
       taskId: "T-001",

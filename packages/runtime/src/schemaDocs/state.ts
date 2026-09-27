@@ -36,7 +36,7 @@ export const stateSchemaDocument: SchemaDocument<"state"> = {
         submissionAttemptId:
           "non-empty string, optional durable identity of the current implementation claim",
         submissionRunId:
-          "RUN-NNN string, optional durable run reservation for the current submission attempt",
+          "non-hidden single directory name (for example RUN-001 or RUN-REPORT-LATER), optional durable run reservation for the current submission attempt",
         latestReviewAttemptId: "string | null, optional",
         activeFeedbackId: "string | null, optional",
         pendingFeedbackId: "string | null, optional",

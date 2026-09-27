@@ -1,20 +1,156 @@
-import { chmod, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  claimNext,
   getAutoRunStatus,
   getExecutionStatus,
   initManagedWorkspace,
   linkProjectSourceRoot,
   trustCommand
 } from "../index.js";
+import { optionalReadFile } from "../fs/optionalFile.js";
+import { prepareBlockRun } from "../autoRun/executorShared.js";
+import { readState } from "../state.js";
+import * as json from "../json.js";
 import { readJsonFile, writeJsonFile } from "../json.js";
 import { createTestWorkspace, writePromptFiles } from "./promptTestHelpers.js";
 import { manifestTestBuilder } from "./manifestTestBuilder.js";
 import { createContractCodexExecAdapter, runContractAutoRunStep } from "./autoRunTestBuilders.js";
 
 describe("Auto Run codex executor", () => {
+  it.each([
+    false,
+    true
+  ])("rejects duplicate automatic execution without releasing its owner (batch=%s)", async (batch) => {
+    const code = `const fs=require('node:fs'); process.stdin.resume(); process.stdin.on('end',()=>{fs.appendFileSync('started.txt',process.pid+'\\n'); const t=setInterval(()=>{if(fs.existsSync('release.txt')){clearInterval(t); console.log('report pid='+process.pid);}},10);});`;
+    const manifest = manifestTestBuilder({ parallel: true, maxConcurrent: 2 })
+      .withExecutor("fake-codex", {
+        adapter: "codex-exec",
+        command: process.execPath,
+        args: ["-e", code]
+      })
+      .withDefaultExecutor("fake-codex")
+      .build();
+    const { root, init } = await createTestWorkspace(manifest);
+    const adapter = createContractCodexExecAdapter({
+      projectRoot: root,
+      executorName: "fake-codex"
+    });
+    const start = () => runContractAutoRunStep({ projectRoot: root, executor: adapter });
+    const started = async () =>
+      (await optionalReadFile(join(root, "started.txt"), "utf8"))
+        ?.trim()
+        .split("\n")
+        .filter(Boolean) ?? [];
+    const waitForOwner = async () => {
+      for (let i = 0; i < 200; i++) {
+        if ((await started()).length > 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error("process barrier timeout");
+    };
+    let owner: ReturnType<typeof start> | undefined;
+    let before: Awaited<ReturnType<typeof readState>> | undefined;
+    let denied: Promise<void> | undefined;
+    let denial: unknown;
+    let settled = false;
+    try {
+      let duplicate: ReturnType<typeof start>;
+      if (batch) {
+        duplicate = runContractAutoRunStep({
+          projectRoot: root,
+          parallel: true,
+          executor: {
+            async runBlock(input) {
+              owner = start();
+              await waitForOwner();
+              before = await readState(init.workspace.stateFile);
+              return adapter.runBlock(input);
+            },
+            async runFeedback() {
+              throw new Error("unexpected feedback");
+            }
+          }
+        });
+      } else {
+        owner = start();
+        await waitForOwner();
+        before = await readState(init.workspace.stateFile);
+        duplicate = start();
+      }
+      denied = duplicate.then(
+        () => {
+          settled = true;
+        },
+        (error: unknown) => {
+          denial = error;
+          settled = true;
+        }
+      );
+      for (let i = 0; i < 200; i++) {
+        if (settled || (await started()).length >= 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(await started()).toHaveLength(1);
+      expect(denial).toBeInstanceOf(Error);
+      expect((denial as Error).message).toContain("already admitted");
+      expect(await readState(init.workspace.stateFile)).toEqual(before);
+      const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
+      expect((await readdir(runRoot)).filter((name) => !name.startsWith("."))).toEqual(["RUN-001"]);
+    } finally {
+      await writeFile(join(root, "release.txt"), "release");
+      await denied;
+      if (owner)
+        expect(await owner).toMatchObject({
+          kind: "submitted",
+          submitResult: { runId: "RUN-001" }
+        });
+    }
+  });
+
+  it("retries a proven pending automatic admission after metadata write failure and rejects unknown legacy admission", async () => {
+    const { root, init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("expected block");
+    const options = {
+      projectRoot: root,
+      claim,
+      executorName: "fake-codex",
+      adapter: "codex-exec" as const,
+      profile: { adapter: "codex-exec" as const, command: process.execPath, args: [] },
+      prompt: "prompt"
+    };
+    const failure = Object.assign(new Error("admission ENOSPC"), { code: "ENOSPC" });
+    const originalWrite = json.writeJsonFile;
+    const spy = vi.spyOn(json, "writeJsonFile").mockImplementation(async (path, value) => {
+      if (
+        path.endsWith("metadata.json") &&
+        typeof (value as Record<string, unknown>).executionAdmittedAt === "string"
+      )
+        throw failure;
+      return originalWrite(path, value);
+    });
+    try {
+      await expect(prepareBlockRun(options)).rejects.toBe(failure);
+    } finally {
+      spy.mockRestore();
+    }
+    const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
+    const metadataPath = join(runRoot, "RUN-001", "metadata.json");
+    expect(await readJsonFile(metadataPath)).toMatchObject({ executionAdmittedAt: null });
+    expect((await prepareBlockRun(options)).runId).toBe("RUN-001");
+    const metadata = await readJsonFile<Record<string, unknown>>(metadataPath);
+    expect(metadata.executionAdmittedAt).toEqual(expect.any(String));
+    delete metadata.executionAdmittedAt;
+    await writeJsonFile(metadataPath, metadata);
+    const original = await readFile(metadataPath, "utf8");
+    await expect(prepareBlockRun(options)).rejects.toThrow("already admitted");
+    expect(await readFile(metadataPath, "utf8")).toBe(original);
+    expect((await readdir(runRoot)).filter((name) => !name.startsWith("."))).toEqual(["RUN-001"]);
+  });
+
   it("persists the scheduler wave id in every CLI run created by one parallel batch", async () => {
     const manifest = manifestTestBuilder({
       parallel: true,

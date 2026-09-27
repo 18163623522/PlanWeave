@@ -1,15 +1,26 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   claimNext,
+  runAutoRunStep,
+  markBlockDiverged,
+  resolveBlockDivergence,
   createManualExecutorAdapter,
   getAutoRunStatus,
   submitBlockResult,
   submitReviewResult
 } from "../index.js";
+import * as json from "../json.js";
+import { readState } from "../state.js";
+import { ExecutorCancelledError, prepareBlockRun } from "../autoRun/executorShared.js";
 import { readJsonFile, writeJsonFile } from "../json.js";
-import { createTestWorkspace, writeReport, writeReviewResult } from "./promptTestHelpers.js";
+import {
+  basicManifest,
+  createTestWorkspace,
+  writeReport,
+  writeReviewResult
+} from "./promptTestHelpers.js";
 import { manifestTestBuilder } from "./manifestTestBuilder.js";
 import {
   createFormalManualCanvasWorkspace,
@@ -17,6 +28,163 @@ import {
 } from "./autoRunTestBuilders.js";
 
 describe("Auto Run manual executor", () => {
+  it.each([
+    false,
+    true
+  ])("binds manual execution to its claimed attempt (parallel=%s)", async (parallel) => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    const result = await runAutoRunStep({ projectRoot: root, parallel, executorName: "manual" });
+    const step = result.kind === "batch_submitted" ? result.steps[0] : result;
+    if (step.kind !== "manual") throw new Error("expected manual step");
+    const state = await readState(init.workspace.stateFile);
+    const metadata = await readJsonFile(join(step.adapterResult.runDir!, "metadata.json"));
+    expect(metadata).toMatchObject({
+      submissionAttemptId: state.blocks[step.claim.ref].submissionAttemptId
+    });
+    const submitted = await submitBlockResult({
+      projectRoot: root,
+      ref: step.claim.ref,
+      reportPath: await writeReport(root, "manual.md")
+    });
+    expect(submitted.runId).toBe(step.adapterResult.runId);
+  });
+
+  it("rejects a prepared parallel result after reclaim without changing the new claim", async () => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    const result = await runAutoRunStep({
+      projectRoot: root,
+      parallel: true,
+      executorName: "manual"
+    });
+    if (result.kind !== "batch_submitted" || result.steps[0].kind !== "manual")
+      throw new Error("expected manual batch");
+    const old = result.steps[0];
+    await markBlockDiverged({ projectRoot: root, ref: old.claim.ref, reason: "retry" });
+    await resolveBlockDivergence({ projectRoot: root, ref: old.claim.ref, reason: "new attempt" });
+    await claimNext({ projectRoot: root, scope: { kind: "block", blockRef: old.claim.ref } });
+    const before = await readState(init.workspace.stateFile);
+    await expect(
+      submitBlockResult({
+        projectRoot: root,
+        ref: old.claim.ref,
+        runId: old.adapterResult.runId,
+        reportPath: await writeReport(root, "old.md")
+      })
+    ).rejects.toThrow("attempt conflicts");
+    expect(await readState(init.workspace.stateFile)).toEqual(before);
+  });
+
+  it.each([
+    "result",
+    "failure",
+    "cancelled"
+  ])("keeps a reclaimed attempt unchanged when the old executor settles via %s", async (outcome) => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    let reclaimedState: Awaited<ReturnType<typeof readState>> | undefined;
+    const executing = runAutoRunStep({
+      projectRoot: root,
+      parallel: true,
+      executor: {
+        async runBlock({ claim }) {
+          const run = await prepareBlockRun({
+            projectRoot: root,
+            claim,
+            executorName: "manual",
+            adapter: "manual",
+            profile: { adapter: "manual" },
+            prompt: "old execution"
+          });
+          await markBlockDiverged({ projectRoot: root, ref: claim.ref, reason: "interrupt" });
+          await resolveBlockDivergence({ projectRoot: root, ref: claim.ref, reason: "retry" });
+          await claimNext({ projectRoot: root, scope: { kind: "block", blockRef: claim.ref } });
+          reclaimedState = await readState(init.workspace.stateFile);
+          if (outcome === "failure") throw new Error("old executor failure");
+          if (outcome === "cancelled") throw new ExecutorCancelledError("old executor cancelled");
+          return {
+            kind: "block" as const,
+            runId: run.runId,
+            reportPath: await writeReport(root, "late.md")
+          };
+        },
+        async runFeedback() {
+          throw new Error("unexpected feedback");
+        }
+      }
+    });
+    await expect(executing).rejects.toThrow(
+      outcome === "result"
+        ? "attempt conflicts"
+        : `old executor ${outcome === "failure" ? "failure" : "cancelled"}`
+    );
+    expect(await readState(init.workspace.stateFile)).toEqual(reclaimedState);
+  });
+
+  it.each([
+    false,
+    true
+  ])("reuses one manual preparation across repeated starts (concurrent=%s)", async (concurrent) => {
+    const { root, init } = await createTestWorkspace();
+    const start = () => runAutoRunStep({ projectRoot: root, executorName: "manual" });
+    const results = concurrent
+      ? await Promise.all([start(), start()])
+      : [await start(), await start()];
+    if (results[0].kind !== "manual" || results[1].kind !== "manual")
+      throw new Error("expected manual steps");
+    expect(results[1].adapterResult.runId).toBe(results[0].adapterResult.runId);
+    const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
+    expect((await readdir(runRoot)).filter((name) => !name.startsWith("."))).toEqual(["RUN-001"]);
+    expect(
+      (
+        await submitBlockResult({
+          projectRoot: root,
+          ref: "T-001#B-001",
+          reportPath: await writeReport(root, "same.md")
+        })
+      ).runId
+    ).toBe("RUN-001");
+  });
+
+  it("retries preparation after initial metadata ENOSPC without leaving an unidentified RUN", async () => {
+    const { root, init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("expected block");
+    const options = {
+      projectRoot: root,
+      claim,
+      executorName: "manual",
+      adapter: "manual" as const,
+      profile: { adapter: "manual" as const },
+      prompt: "prompt"
+    };
+    const failure = Object.assign(new Error("prepare metadata ENOSPC"), { code: "ENOSPC" });
+    const spy = vi.spyOn(json, "writeJsonFile").mockImplementationOnce(async () => {
+      throw failure;
+    });
+    try {
+      await expect(prepareBlockRun(options)).rejects.toBe(failure);
+    } finally {
+      spy.mockRestore();
+    }
+    const run = await prepareBlockRun(options);
+    expect(run.runId).toBe("RUN-001");
+    expect(
+      (
+        await submitBlockResult({
+          projectRoot: root,
+          ref: claim.ref,
+          reportPath: await writeReport(root, "recovered.md")
+        })
+      ).runId
+    ).toBe(run.runId);
+    expect((await readState(init.workspace.stateFile)).blocks[claim.ref].status).toBe("completed");
+  });
+
   it("manual adapter claims a block, writes the rendered prompt artifact, and waits for manual submission", async () => {
     const { root, init } = await createTestWorkspace();
     const step = await runContractAutoRunStep({

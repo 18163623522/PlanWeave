@@ -125,7 +125,12 @@ async function claimNextUnlocked(options: {
   // Sequential mode keeps the current-block short-circuit. Parallel mode streams/backfills
   // capacity while live work remains (do not re-return currentBlock as a barrier).
   if (!options.parallel && readiness.claimOrder.kind === "currentBlock") {
-    return readiness.claimOrder.result;
+    return {
+      ...readiness.claimOrder.result,
+      ...(readiness.claimOrder.result.blockType === "implementation"
+        ? { submissionAttemptId: state.blocks[readiness.claimOrder.ref].submissionAttemptId }
+        : {})
+    };
   }
 
   const claimCandidate = async (
@@ -144,7 +149,12 @@ async function claimNextUnlocked(options: {
     }
     state = refreshDerivedState(manifest, state);
     await writeState(workspace.stateFile, state);
-    return candidate.result;
+    return {
+      ...candidate.result,
+      ...(candidate.result.blockType === "implementation"
+        ? { submissionAttemptId: state.blocks[candidate.ref].submissionAttemptId }
+        : {})
+    };
   };
 
   const claimSequentialReviewBlock = async (
@@ -237,6 +247,14 @@ async function claimNextUnlocked(options: {
       kind: "batch",
       // Return only newly claimed refs so Auto Run does not re-dispatch live work.
       refs: selected,
+      submissionAttemptIds: Object.fromEntries(
+        selected.flatMap((ref) => {
+          const attemptId = state.blocks[ref].submissionAttemptId;
+          return getBlock(graph, ref).type === "implementation" && attemptId
+            ? [[ref, attemptId]]
+            : [];
+        })
+      ),
       effectiveExecutors: effectiveExecutorsForRefs(
         selected,
         graph,

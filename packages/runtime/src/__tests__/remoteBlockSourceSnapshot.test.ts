@@ -9,6 +9,8 @@ import {
   claimDispatchedBlock,
   createRemoteBlockArtifactSource,
   createRemoteBlockRuntimePort,
+  markBlockDiverged,
+  resolveBlockDivergence,
   renderPromptSurface,
   submitBlockResult
 } from "../taskManager/index.js";
@@ -299,14 +301,28 @@ describe("remote block runtime inspection", () => {
     const identity = activeIdentity(candidate);
     await port.claim({ ref: "T-002#B-001", ...claimIdentity(identity) });
     await port.activate({ ref: "T-002#B-001", ...identity });
+    const interrupted = await port.markInterrupted({
+      ref: "T-002#B-001",
+      ...identity,
+      interruption: { reason: "transport_lost", resumable: true }
+    });
+    expect(interrupted.retryDecision).toBe("resume_exact_attempt");
+    expect(await port.reconcile({ ref: "T-002#B-001", operationId: identity.operationId })).toEqual(
+      interrupted.binding
+    );
 
-    const replacementState = await readState(init.workspace.stateFile);
-    replacementState.blocks["T-001#B-001"] = {
-      ...replacementState.blocks["T-001#B-001"],
-      status: "in_progress"
-    };
-    replacementState.currentRefs = [...new Set([...replacementState.currentRefs, "T-001#B-001"])];
-    await writeState(init.workspace.stateFile, replacementState);
+    await markBlockDiverged({
+      projectRoot: root,
+      ref: "T-001#B-001",
+      reason: "replacement execution"
+    });
+    await resolveBlockDivergence({
+      projectRoot: root,
+      ref: "T-001#B-001",
+      reason: "retry upstream"
+    });
+    const replacementClaim = await claimDispatchedBlock({ projectRoot: root, ref: "T-001#B-001" });
+    expect(replacementClaim).toMatchObject({ kind: "block", ref: "T-001#B-001" });
     const replacementRun = await submitBlockResult({
       projectRoot: root,
       ref: "T-001#B-001",
@@ -323,9 +339,16 @@ describe("remote block runtime inspection", () => {
     await writeState(init.workspace.stateFile, replacementReviewState);
     expect(replacementRun.runId).not.toBe(upstreamRun.runId);
 
-    await expect(
-      port.reconcile({ ref: "T-002#B-001", operationId: identity.operationId })
-    ).resolves.toMatchObject({ status: "diverged", ownership: identity });
+    const drifted = await port.reconcile({
+      ref: "T-002#B-001",
+      operationId: identity.operationId
+    });
+    expect(drifted).toMatchObject({
+      status: "diverged",
+      ownership: identity,
+      divergenceReason: expect.stringContaining("Remote source changed")
+    });
+    expect(drifted.interruption).toBeUndefined();
     await expect(
       port.complete({
         ref: "T-002#B-001",
