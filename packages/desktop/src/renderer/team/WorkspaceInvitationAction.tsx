@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ClipboardCopyIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { createTranslator } from "../i18n";
@@ -11,22 +11,33 @@ export function WorkspaceInvitationAction({
 }: {
   busy: boolean;
   unavailable?: boolean;
-  onCopy: () => Promise<boolean>;
+  onCopy: () => Promise<boolean | null>;
   t: ReturnType<typeof createTranslator>;
 }) {
   const [state, setState] = useState<"idle" | "copying" | "copied" | "error">("idle");
   const pending = useRef(false);
+  const revision = useRef(0);
+  useEffect(
+    () => () => {
+      revision.current += 1;
+      pending.current = false;
+    },
+    []
+  );
   const copy = async () => {
     if (pending.current || busy) return;
+    const startedAt = revision.current;
     pending.current = true;
     setState("copying");
     try {
-      setState((await onCopy()) ? "copied" : "error");
+      const result = await onCopy();
+      if (revision.current === startedAt)
+        setState(result === null ? "idle" : result ? "copied" : "error");
     } catch {
       // Clipboard and invitation issuance failures leave the page usable and allow retry.
-      setState("error");
+      if (revision.current === startedAt) setState("error");
     } finally {
-      pending.current = false;
+      if (revision.current === startedAt) pending.current = false;
     }
   };
   return (

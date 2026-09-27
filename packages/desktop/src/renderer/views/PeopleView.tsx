@@ -28,7 +28,11 @@ import { LocalServerLifecycleControls } from "../collaboration/LocalServerLifecy
 import { WorkspaceAccessScopeSelector } from "../collaboration/WorkspaceAccessScopeSelector";
 import { WorkspaceCanvasSharingPanel } from "../collaboration/WorkspaceCanvasSharingPanel";
 import { DeploymentConnectionCard } from "../settings/DeploymentConnectionCard";
-import { useHostAdministrationController } from "../hooks/useHostAdministrationController";
+import {
+  selectedProfile,
+  useOperatorControlStatusSnapshot
+} from "../hooks/useOperatorControlStatusSnapshot";
+import { useMemberSetupCode } from "../hooks/useMemberSetupCode";
 import { isCollaborationSessionConnected } from "../collaboration/sessionState";
 import {
   collaborationConnectionErrorMessage,
@@ -142,7 +146,7 @@ export function PeopleView({
     error: collaborationStatusError,
     refresh: refreshCollaborationStatus
   } = useCollaborationStatus({ api });
-  const hostController = useHostAdministrationController();
+  const operatorSnapshot = useOperatorControlStatusSnapshot();
 
   const activeProfile = useMemo(() => {
     if (!status?.activeProfileId) return null;
@@ -165,13 +169,27 @@ export function PeopleView({
   useEffect(() => {
     setSelectedMemberId(null);
   }, [connectedWorkspace?.profile?.profileId, connectedWorkspace?.workspaceId]);
-  const invitationOperator =
-    hostController.status?.profiles.find(
-      (profile) =>
-        profile.hasOperatorCredential &&
-        invitationWorkspace &&
-        new URL(profile.serverBaseUrl).origin === new URL(invitationWorkspace.serverBaseUrl).origin
-    ) ?? null;
+  const workspaceOperator = invitationWorkspace
+    ? selectedProfile(
+        operatorSnapshot.status,
+        null,
+        new URL(invitationWorkspace.serverBaseUrl).origin
+      ).profile
+    : null;
+  const invitationOperator = workspaceOperator?.hasOperatorCredential ? workspaceOperator : null;
+
+  const memberSetupCode = useMemberSetupCode(
+    operatorSnapshot,
+    invitationWorkspace && invitationOperator
+      ? {
+          profileId: invitationOperator.profileId,
+          workspaceId: invitationWorkspace.workspaceId,
+          serverBaseUrl: invitationWorkspace.serverBaseUrl
+        }
+      : null,
+    connectedWorkspace?.profile?.profileId ?? null,
+    connectedWorkspace?.credentialRevision ?? null
+  );
 
   const sessionConnected = isCollaborationSessionConnected(status);
   const workspaceConnected = connectedWorkspace?.status === "connected";
@@ -334,17 +352,6 @@ export function PeopleView({
       onUpdateVisibility={workspaceAccessScope.access.updateVisibility}
     />
   );
-  const copyMemberInvitation = async () => {
-    if (invitationWorkspace && invitationOperator) {
-      const result = await hostController.copyMemberSetupCode({
-        profileId: invitationOperator.profileId,
-        workspaceId: invitationWorkspace.workspaceId,
-        serverBaseUrl: invitationWorkspace.serverBaseUrl
-      });
-      return Boolean(result);
-    }
-    return false;
-  };
 
   return (
     <section
@@ -478,10 +485,10 @@ export function PeopleView({
                 (panel.presence.currentUserIsOwner ||
                   (invitationWorkspace && invitationOperator)) ? (
                 <WorkspaceInvitationAction
-                  key={`${connectedWorkspace?.profile?.profileId}:${connectedWorkspace?.workspaceId}`}
-                  busy={hostController.busy}
+                  key={memberSetupCode.identity}
+                  busy={memberSetupCode.busy}
                   unavailable={!invitationOperator || !invitationWorkspace}
-                  onCopy={copyMemberInvitation}
+                  onCopy={memberSetupCode.copy}
                   t={t}
                 />
               ) : null}

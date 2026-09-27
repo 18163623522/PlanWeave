@@ -190,6 +190,7 @@
         "peoplePanel.test.tsx",
         "peoplePanelInvitationCopy.test.tsx",
         "peopleView.test.tsx",
+        "peopleViewWorkspace.test.tsx",
         "peopleViewModels.test.ts",
         "persistedCollaborationSessionRecovery.test.ts",
         "persistedDesktopServerConnection.test.ts",

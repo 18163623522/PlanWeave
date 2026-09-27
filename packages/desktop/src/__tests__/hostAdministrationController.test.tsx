@@ -249,16 +249,25 @@ describe("Host administration request authority", () => {
 
   it("runs the five-second silent poll without replacing the ready state with loading", async () => {
     vi.useFakeTimers();
-    const { result } = renderHook(() => useHostAdministrationController());
+    const { result, unmount } = renderHook(() => useHostAdministrationController());
     await act(async () => vi.advanceTimersByTimeAsync(0));
     expect(bridgeMock.listOperatorHosts).toHaveBeenCalledOnce();
     expect(result.current.hostInventoryState).toBe("ready");
 
+    const initialLocalReads = bridgeMock.getOperatorLocalAgentHostStatus.mock.calls.length;
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(bridgeMock.listOperatorHosts).toHaveBeenCalledTimes(cycle + 2);
+      expect(bridgeMock.getOperatorLocalAgentHostStatus).toHaveBeenCalledTimes(
+        initialLocalReads + cycle + 1
+      );
+      expect(result.current.hostInventoryState).toBe("ready");
+      expect(result.current.hostsLoading).toBe(false);
+    }
+    unmount();
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
-
-    expect(bridgeMock.listOperatorHosts).toHaveBeenCalledTimes(2);
-    expect(result.current.hostInventoryState).toBe("ready");
-    expect(result.current.hostsLoading).toBe(false);
+    expect(bridgeMock.listOperatorHosts).toHaveBeenCalledTimes(4);
+    expect(bridgeMock.getOperatorLocalAgentHostStatus).toHaveBeenCalledTimes(initialLocalReads + 3);
   });
 
   it("coalesces concurrent continuation calls into one non-terminal batch", async () => {
