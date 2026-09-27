@@ -19,6 +19,9 @@ import {
 } from "./sqliteDatabase.js";
 
 const recordRowSchema = z.object({ record_json: z.string() });
+const storageSequenceRowSchema = z.object({ sequence: z.number().int().positive().safe() });
+const engineRecordRowSchema = storageSequenceRowSchema.extend({ record_json: z.string() });
+type EngineRecord = Extract<AgentHostRemoteExecutionRecord, { kind: "engine_event" }>;
 
 export type AgentHostRemoteExecutionRetention = {
   maxRecordsPerExecution: number;
@@ -150,6 +153,86 @@ export class AgentHostRemoteExecutionRecordStore implements AgentHostRemoteExecu
           JSON.parse(recordRowSchema.parse(row).record_json)
         )
       );
+  }
+
+  storageSequence(identity: AgentHostRemoteExecutionIdentity, sourceSequence: number): number {
+    const row = this.database
+      .prepare(
+        `SELECT sequence FROM agent_host_remote_execution_outbox
+         WHERE dispatch_id=? AND lease_id=? AND execution_attempt_id=?
+           AND record_kind='engine_event' AND record_id=?`
+      )
+      .get(
+        identity.dispatchId,
+        identity.leaseId,
+        identity.executionAttemptId,
+        String(sourceSequence)
+      );
+    if (!row) throw new Error("remote_execution_relay_checkpoint_missing");
+    return storageSequenceRowSchema.parse(row).sequence;
+  }
+
+  upperStorageSequence(identity: AgentHostRemoteExecutionIdentity): number {
+    const row = this.database
+      .prepare(
+        `SELECT sequence FROM agent_host_remote_execution_outbox
+         WHERE dispatch_id=? AND lease_id=? AND execution_attempt_id=?
+         ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(identity.dispatchId, identity.leaseId, identity.executionAttemptId);
+    return row ? storageSequenceRowSchema.parse(row).sequence : 0;
+  }
+
+  engineRecordsBetween(
+    identity: AgentHostRemoteExecutionIdentity,
+    afterSequence: number,
+    throughSequence: number,
+    limit: number
+  ): Array<{ storageSequence: number; record: EngineRecord }> {
+    z.number().int().nonnegative().safe().parse(afterSequence);
+    z.number().int().nonnegative().safe().parse(throughSequence);
+    z.number().int().positive().safe().parse(limit);
+    return this.database
+      .prepare(
+        `SELECT sequence,record_json FROM agent_host_remote_execution_outbox
+         WHERE dispatch_id=? AND lease_id=? AND execution_attempt_id=?
+           AND sequence>? AND sequence<=? AND record_kind='engine_event'
+         ORDER BY sequence LIMIT ?`
+      )
+      .all(
+        identity.dispatchId,
+        identity.leaseId,
+        identity.executionAttemptId,
+        afterSequence,
+        throughSequence,
+        limit
+      )
+      .map((raw) => {
+        const row = engineRecordRowSchema.parse(raw);
+        const record = agentHostRemoteExecutionRecordSchema.parse(JSON.parse(row.record_json));
+        if (record.kind !== "engine_event")
+          throw new Error("remote_execution_engine_record_required");
+        return { storageSequence: row.sequence, record };
+      });
+  }
+
+  capabilitySnapshot(identity: AgentHostRemoteExecutionIdentity): EngineRecord | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT record_json FROM agent_host_remote_execution_outbox
+         WHERE dispatch_id=? AND lease_id=? AND execution_attempt_id=?
+           AND record_kind='engine_event' AND json_extract(record_json,'$.event.kind')='capability_snapshot'
+         ORDER BY sequence LIMIT 1`
+      )
+      .get(identity.dispatchId, identity.leaseId, identity.executionAttemptId);
+    if (!row) return undefined;
+    const record = agentHostRemoteExecutionRecordSchema.parse(
+      JSON.parse(recordRowSchema.parse(row).record_json)
+    );
+    if (record.kind !== "engine_event" || record.event.kind !== "capability_snapshot") {
+      throw new Error("remote_execution_capability_snapshot_invalid");
+    }
+    return record;
   }
 }
 

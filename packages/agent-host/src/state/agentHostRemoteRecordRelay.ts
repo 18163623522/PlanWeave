@@ -40,44 +40,56 @@ export class AgentHostRemoteRecordRelay {
     if (this.executions.pinEventProtocolVersion(execution.sequence, 2) !== 2) {
       throw new Error("execution_event_protocol_version_conflict");
     }
-    const records = this.remoteRecords.records({
+    const identity = {
       dispatchId: evidence.dispatchId,
       leaseId: evidence.leaseId,
       executionAttemptId: evidence.executionAttemptId
-    });
-    const engineRecords = records.filter(
-      (candidate): candidate is Extract<AgentHostRemoteExecutionRecord, { kind: "engine_event" }> =>
-        candidate.kind === "engine_event"
-    );
-    const pending = engineRecords.slice(evidence.eventCursor);
-    for (const record of pending) {
-      const current = this.executions.evidence(execution.sequence);
-      if (!current?.acpSessionId) throw new Error("remote_execution_session_identity_stale");
-      const afterCursor = current.eventCursor;
-      const cursor = afterCursor + 1;
-      this.executions.advanceEventCursor(execution.sequence, afterCursor, cursor);
-      this.events.queue(
-        `acp.events.v2:${record.identity.dispatchId}:${record.identity.executionAttemptId}:${cursor}`,
-        parseAgentHostEvent({
-          type: "acp.events",
-          protocolVersion: 1,
-          eventProtocolVersion: 2,
-          messageId: randomUUID(),
-          ...record.identity,
-          acpSessionId: current.acpSessionId,
-          afterCursor,
-          cursor,
-          events: [
-            {
-              eventVersion: 2,
-              cursor,
-              sourceSequence: record.event.sequence,
-              timestamp: record.event.timestamp,
-              fragment: remoteAcpEngineFragment(record.event)
-            }
-          ]
-        })
+    };
+    // The cursor and its durable wire event commit together; ACK keeps that event
+    // until terminal compaction removes the execution and its source records.
+    const checkpoint = this.events.remoteEngineCheckpoint(identity, evidence.eventCursor);
+    let afterSequence = checkpoint
+      ? this.remoteRecords.storageSequence(checkpoint.identity, checkpoint.sourceSequence)
+      : 0;
+    const upperSequence = this.remoteRecords.upperStorageSequence(identity);
+    while (afterSequence < upperSequence) {
+      const pending = this.remoteRecords.engineRecordsBetween(
+        identity,
+        afterSequence,
+        upperSequence,
+        256
       );
+      if (pending.length === 0) break;
+      for (const { storageSequence, record } of pending) {
+        const current = this.executions.evidence(execution.sequence);
+        if (!current?.acpSessionId) throw new Error("remote_execution_session_identity_stale");
+        const afterCursor = current.eventCursor;
+        const cursor = afterCursor + 1;
+        this.executions.advanceEventCursor(execution.sequence, afterCursor, cursor);
+        this.events.queue(
+          `acp.events.v2:${record.identity.dispatchId}:${record.identity.executionAttemptId}:${cursor}`,
+          parseAgentHostEvent({
+            type: "acp.events",
+            protocolVersion: 1,
+            eventProtocolVersion: 2,
+            messageId: randomUUID(),
+            ...record.identity,
+            acpSessionId: current.acpSessionId,
+            afterCursor,
+            cursor,
+            events: [
+              {
+                eventVersion: 2,
+                cursor,
+                sourceSequence: record.event.sequence,
+                timestamp: record.event.timestamp,
+                fragment: remoteAcpEngineFragment(record.event)
+              }
+            ]
+          })
+        );
+        afterSequence = storageSequence;
+      }
     }
   }
 
@@ -89,12 +101,7 @@ export class AgentHostRemoteRecordRelay {
         throw new Error("remote_runner_event_v2_required");
       }
       if (record.event.kind === "session_started") {
-        const capabilitySnapshot = this.remoteRecords
-          .records(record.identity)
-          .find(
-            (candidate) =>
-              candidate.kind === "engine_event" && candidate.event.kind === "capability_snapshot"
-          );
+        const capabilitySnapshot = this.remoteRecords.capabilitySnapshot(record.identity);
         if (
           !capabilitySnapshot ||
           capabilitySnapshot.kind !== "engine_event" ||

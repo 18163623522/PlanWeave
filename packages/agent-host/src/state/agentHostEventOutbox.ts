@@ -9,6 +9,7 @@ import {
 } from "../protocol.js";
 import { outboxRowSchema } from "./agentHostStateRecords.js";
 import type { SqliteDatabase } from "./sqliteDatabase.js";
+import type { AgentHostRemoteExecutionIdentity } from "../execution/remoteAcpPorts.js";
 
 function sameEventPayload(left: HistoricalHostEvent, right: HistoricalHostEvent): boolean {
   const { messageId: _leftMessageId, ...leftPayload } = left;
@@ -55,6 +56,40 @@ export class AgentHostEventOutbox {
       .prepare("SELECT COUNT(*) AS count FROM agent_host_outbox WHERE acknowledged_at IS NULL")
       .get();
     return Number(row?.count ?? 0);
+  }
+
+  remoteEngineCheckpoint(
+    identity: AgentHostRemoteExecutionIdentity,
+    cursor: number
+  ): { identity: AgentHostRemoteExecutionIdentity; sourceSequence: number } | undefined {
+    if (cursor === 0) return undefined;
+    const row = this.database
+      .prepare("SELECT event_json FROM agent_host_outbox WHERE event_key=?")
+      .get(`acp.events.v2:${identity.dispatchId}:${identity.executionAttemptId}:${cursor}`);
+    if (!row) throw new Error("remote_execution_relay_checkpoint_missing");
+    const event = parseHistoricalAgentHostEvent(JSON.parse(outboxRowSchema.parse(row).event_json));
+    if (
+      event.type !== "acp.events" ||
+      !("eventProtocolVersion" in event) ||
+      event.eventProtocolVersion !== 2 ||
+      event.dispatchId !== identity.dispatchId ||
+      event.executionAttemptId !== identity.executionAttemptId ||
+      event.cursor !== cursor
+    ) {
+      throw new Error("remote_execution_relay_checkpoint_conflict");
+    }
+    const last = event.events.at(-1);
+    if (!last || last.cursor !== cursor) {
+      throw new Error("remote_execution_relay_checkpoint_conflict");
+    }
+    return {
+      identity: {
+        dispatchId: event.dispatchId,
+        leaseId: event.leaseId,
+        executionAttemptId: event.executionAttemptId
+      },
+      sourceSequence: last.sourceSequence
+    };
   }
 
   queue(eventKey: string, input: HostEvent): HostEvent {

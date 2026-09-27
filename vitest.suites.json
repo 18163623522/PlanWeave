@@ -795,6 +795,7 @@
         "canvasRuntimeWorkItemFacts.test.ts",
         "connectionStatus.test.ts",
         "durableAcpRelay.test.ts",
+        "durableAcpRelayIncremental.test.ts",
         "historicalPermissionPersistence.test.ts",
         "remoteRunnerEventNegotiation.test.ts",
         "httpArtifactTransfer.test.ts",
