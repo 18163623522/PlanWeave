@@ -297,18 +297,30 @@ export function useServerManagementAuthorization(
         refreshCheck.current?.();
         return;
       }
+      const retryAuthority = authority.current;
+      const sequence = ++requestSequence.current;
+      const isCurrentRetry = () =>
+        mounted.current &&
+        authority.current === retryAuthority &&
+        requestSequence.current === sequence;
+      setChecking({ generation: retryAuthority.generation, value: true });
       void (async () => {
-        const result = await operatorStatus.refresh();
-        if (!mounted.current) return;
-        if (!result.ok) {
-          setError({ generation: authority.current.generation, value: result.error });
-          return;
+        try {
+          const result = await operatorStatus.refresh();
+          if (!isCurrentRetry()) return;
+          if (!result.ok) {
+            if (result.error !== "operator_status_superseded")
+              setError({ generation: retryAuthority.generation, value: result.error });
+            return;
+          }
+          syncAuthority();
+          setError(null);
+          setVerified(null);
+          if (authority.current === retryAuthority) refreshCheck.current?.();
+        } finally {
+          if (isCurrentRetry())
+            setChecking({ generation: retryAuthority.generation, value: false });
         }
-        const generationBefore = authority.current.generation;
-        syncAuthority();
-        setError(null);
-        setVerified(null);
-        if (authority.current.generation === generationBefore) refreshCheck.current?.();
       })();
     },
     importCredential: () => run("import"),

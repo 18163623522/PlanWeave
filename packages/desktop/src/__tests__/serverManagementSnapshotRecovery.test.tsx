@@ -222,6 +222,113 @@ it("retains the conflict and reports a second read failure without checking ambi
   await act(async () => result.current.a.refresh());
   await waitFor(() => expect(result.current.a.error).toBe("operator_timeout"));
   expect(api.getManagementAuthorization).toHaveBeenCalledTimes(checksBefore);
+  expect(result.current.a.checking).toBe(false);
   expect(result.current.b.error).toBeNull();
   expect(result.current.b.management?.authorization).toBeTruthy();
+  api.getOperatorControlStatus.mockResolvedValueOnce(initial);
+  await act(async () => result.current.a.refresh());
+  await waitFor(() => expect(result.current.a.error).toBeNull());
+  expect(result.current.a.checking).toBe(false);
+  expect(result.current.a.management?.authorization).toBeTruthy();
+});
+
+async function failConflictRead() {
+  api.getOperatorControlStatus.mockRejectedValueOnce(new Error("operator_offline"));
+  await act(async () => statusChanged({ ...changed("a", "r2"), updatedAt: initial.updatedAt }));
+}
+
+it.each([
+  "success",
+  "failure"
+] as const)("ignores an old conflict retry %s after selecting another identity", async (outcome) => {
+  const { result } = await load();
+  await failConflictRead();
+  const pending = deferred<OperatorControlStatus>();
+  api.getOperatorControlStatus.mockReturnValueOnce(pending.promise);
+  await act(async () => result.current.a.refresh());
+  await act(async () => result.current.a.selectProfile("alternate"));
+  await waitFor(() => expect(result.current.a.management?.profileId).toBe("alternate"));
+  const checks = api.getManagementAuthorization.mock.calls.length;
+  await act(async () => {
+    if (outcome === "success") pending.resolve(initial);
+    else pending.reject(new Error("operator_timeout"));
+  });
+  expect(result.current.a.profileId).toBe("alternate");
+  expect(result.current.a.management?.profileId).toBe("alternate");
+  expect(result.current.a.error).toBeNull();
+  expect(result.current.a.checking).toBe(false);
+  expect(api.getManagementAuthorization).toHaveBeenCalledTimes(checks);
+  expect(result.current.b.error).toBeNull();
+  expect(result.current.b.management?.authorization).toBeTruthy();
+});
+
+it.each([
+  "success",
+  "failure"
+] as const)("does not let an older retry %s replace the newer retry's success for the same authority", async (outcome) => {
+  const { result } = await load();
+  await failConflictRead();
+  const older = deferred<OperatorControlStatus>();
+  const newer = deferred<OperatorControlStatus>();
+  api.getOperatorControlStatus
+    .mockReturnValueOnce(older.promise)
+    .mockReturnValueOnce(newer.promise);
+  await act(async () => result.current.a.refresh());
+  await act(async () => result.current.a.refresh());
+  await act(async () => newer.resolve(initial));
+  await waitFor(() => expect(result.current.a.error).toBeNull());
+  await waitFor(() => expect(result.current.a.checking).toBe(false));
+  const checks = api.getManagementAuthorization.mock.calls.length;
+  await act(async () => {
+    if (outcome === "success") older.resolve(initial);
+    else older.reject(new Error("operator_timeout"));
+  });
+  expect(result.current.a.error).toBeNull();
+  expect(result.current.a.checking).toBe(false);
+  expect(result.current.a.management?.authorization).toBeTruthy();
+  expect(api.getManagementAuthorization).toHaveBeenCalledTimes(checks);
+  expect(result.current.b.error).toBeNull();
+});
+
+it("keeps checking active until the current conflict retry and authorization check both settle", async () => {
+  const { result } = await load();
+  await failConflictRead();
+  const older = deferred<OperatorControlStatus>();
+  const newer = deferred<OperatorControlStatus>();
+  const authorization = deferred<OperatorManagementView>();
+  api.getOperatorControlStatus
+    .mockReturnValueOnce(older.promise)
+    .mockReturnValueOnce(newer.promise);
+  await act(async () => result.current.a.refresh());
+  expect(result.current.a.checking).toBe(true);
+  expect(result.current.b.checking).toBe(false);
+  await act(async () => result.current.a.refresh());
+  await act(async () => older.reject(new Error("operator_timeout")));
+  expect(result.current.a.checking).toBe(true);
+  expect(result.current.a.error).not.toBe("operator_timeout");
+  api.getManagementAuthorization.mockReturnValueOnce(authorization.promise);
+  await act(async () => newer.resolve(initial));
+  expect(result.current.a.checking).toBe(true);
+  await act(async () => authorization.resolve(authorized("a")));
+  expect(result.current.a.checking).toBe(false);
+  expect(result.current.a.error).toBeNull();
+  expect(result.current.b.management?.authorization).toBeTruthy();
+});
+
+it.each([
+  "success",
+  "failure"
+] as const)("does not start authorization reads after an unmounted conflict retry %s", async (outcome) => {
+  const { result, unmount } = await load();
+  await failConflictRead();
+  const pending = deferred<OperatorControlStatus>();
+  api.getOperatorControlStatus.mockReturnValueOnce(pending.promise);
+  await act(async () => result.current.a.refresh());
+  const checks = api.getManagementAuthorization.mock.calls.length;
+  unmount();
+  await act(async () => {
+    if (outcome === "success") pending.resolve(initial);
+    else pending.reject(new Error("operator_timeout"));
+  });
+  expect(api.getManagementAuthorization).toHaveBeenCalledTimes(checks);
 });
