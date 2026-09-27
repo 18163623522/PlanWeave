@@ -77,6 +77,11 @@ describe("server data archive", () => {
     const root = await tempDir();
     const dataDirectory = await seedDataDirectory(root);
     const archivePath = join(root, "server-data.tgz");
+    const lockDirectory = join(dataDirectory, "comment-attachments", "lifecycle-locks");
+    await mkdir(lockDirectory, { recursive: true });
+    const lockDatabase = await openServerDatabase(join(lockDirectory, "coord.sqlite"), 1000);
+    lockDatabase.exec("CREATE TABLE lock_fixture (id INTEGER)");
+    lockDatabase.close();
 
     const manifest = await exportServerDataDirectory({
       dataDirectory,
@@ -105,6 +110,9 @@ describe("server data archive", () => {
     await expect(readFile(join(restored, "backups", "old"))).rejects.toMatchObject({
       code: "ENOENT"
     });
+    await expect(
+      readFile(join(restored, "comment-attachments", "lifecycle-locks", "coord.sqlite"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
     const restoredDatabase = await openServerDatabase(
       join(restored, "planweave-server.sqlite"),
       1_000

@@ -7,36 +7,23 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { commentContentSha256Schema } from "../comments/schemas.js";
 import { inWriteTransaction, type SqliteDatabase } from "../sqlite.js";
-import { withAttachmentCleanup } from "./errors.js";
+import { withAttachmentCleanup, withAttachmentCleanupFailure } from "./errors.js";
 
 const require = createRequire(import.meta.url);
-declare global {
-  var planweaveCommentAttachmentProcess:
-    | {
-        instance: string;
-        activeClaims: Set<string>;
-      }
-    | undefined;
-}
-if (!globalThis.planweaveCommentAttachmentProcess) {
-  globalThis.planweaveCommentAttachmentProcess = {
-    instance: randomUUID(),
-    activeClaims: new Set<string>()
-  };
-}
-const processState = globalThis.planweaveCommentAttachmentProcess;
-const processInstance = processState.instance;
+const processInstance = randomUUID();
 const claimSchema = z.object({
   owner_token: z.string().uuid(),
   process_id: z.number().int().positive(),
   hostname: z.string().min(1),
-  process_instance: z.string().uuid()
+  process_instance: z.string().uuid(),
+  coordination_version: z.union([z.literal(0), z.literal(1)])
 });
 
 /** Persistent, root-scoped claims; SQLite transactions never span protected file I/O. */
 export class CommentAttachmentDigestLifecycle {
   private readonly path: string;
   private readonly databasePath: string;
+  private readonly lockDirectory: string;
 
   constructor(database: SqliteDatabase, dataDirectory: string) {
     const main = database
@@ -47,6 +34,8 @@ export class CommentAttachmentDigestLifecycle {
     const root = join(dataDirectory, "comment-attachments");
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.path = join(realpathSync(root), "lifecycle.sqlite");
+    this.lockDirectory = join(realpathSync(root), "lifecycle-locks");
+    mkdirSync(this.lockDirectory, { recursive: true, mode: 0o700 });
     const claims = this.open();
     try {
       chmodSync(this.path, 0o600);
@@ -55,13 +44,19 @@ export class CommentAttachmentDigestLifecycle {
       );
       CREATE TABLE IF NOT EXISTS attachment_digest_claims (
         digest TEXT PRIMARY KEY, owner_token TEXT NOT NULL, process_id INTEGER NOT NULL,
-        hostname TEXT NOT NULL, process_instance TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS attachment_process_instances (
-        hostname TEXT NOT NULL, process_id INTEGER NOT NULL, process_instance TEXT NOT NULL,
-        PRIMARY KEY(hostname,process_id)
+        hostname TEXT NOT NULL, process_instance TEXT NOT NULL,
+        coordination_version INTEGER NOT NULL DEFAULT 0 CHECK(coordination_version IN (0,1))
       );`);
       inWriteTransaction(claims, () => {
+        if (
+          !claims
+            .prepare("PRAGMA table_info(attachment_digest_claims)")
+            .all()
+            .some((column) => column.name === "coordination_version")
+        ) {
+          claims.exec(`ALTER TABLE attachment_digest_claims ADD COLUMN
+            coordination_version INTEGER NOT NULL DEFAULT 0 CHECK(coordination_version IN (0,1))`);
+        }
         claims
           .prepare("INSERT OR IGNORE INTO attachment_database_root VALUES(1,?)")
           .run(this.databasePath);
@@ -70,10 +65,6 @@ export class CommentAttachmentDigestLifecycle {
           .get();
         if (bound?.database_path !== this.databasePath)
           throw new Error("attachment_database_root_conflict");
-        claims
-          .prepare(`INSERT INTO attachment_process_instances VALUES(?,?,?)
-          ON CONFLICT(hostname,process_id) DO UPDATE SET process_instance=excluded.process_instance`)
-          .run(hostname(), process.pid, processInstance);
       });
     } finally {
       claims.close();
@@ -86,53 +77,46 @@ export class CommentAttachmentDigestLifecycle {
     const claims = this.open();
     const deadline = performance.now() + 30_000;
     let acquired = false;
+    let kernelLock: SqliteDatabase | undefined;
     return withAttachmentCleanup(
       async () => {
+        kernelLock = this.openKernelLock(digest);
         while (!acquired) {
-          acquired = inWriteTransaction(claims, () => {
-            const raw = claims
-              .prepare("SELECT * FROM attachment_digest_claims WHERE digest=?")
-              .get(digest);
-            if (raw) {
-              const owner = claimSchema.parse(raw);
-              if (owner.hostname !== hostname())
-                throw new Error("attachment_digest_owned_by_remote_host");
-              const registered = claims
-                .prepare(`SELECT process_instance FROM attachment_process_instances
-              WHERE hostname=? AND process_id=?`)
-                .get(owner.hostname, owner.process_id);
-              if (!registered) throw new Error("attachment_digest_owner_identity_missing");
-              const registeredInstance = z.string().uuid().parse(registered.process_instance);
-              let active = registeredInstance === owner.process_instance;
-              if (owner.process_id === process.pid && owner.process_instance === processInstance) {
-                active = processState.activeClaims.has(owner.owner_token);
+          let locked = false;
+          try {
+            // EXCLUSIVE mode retains the file lock after COMMIT, without an open transaction.
+            kernelLock.exec("BEGIN EXCLUSIVE; COMMIT;");
+            locked = true;
+          } catch (error) {
+            if (!(error instanceof Error && "errcode" in error && error.errcode === 5)) throw error;
+          }
+          if (locked)
+            acquired = inWriteTransaction(claims, () => {
+              const raw = claims
+                .prepare("SELECT * FROM attachment_digest_claims WHERE digest=?")
+                .get(digest);
+              if (raw) {
+                const owner = claimSchema.parse(raw);
+                if (owner.coordination_version !== 1)
+                  throw new Error(
+                    "attachment_digest_legacy_owner_unverified: stop all old instances, drain protected operations; only recover offline after confirming every old owner has stopped"
+                  );
+                claims
+                  .prepare("DELETE FROM attachment_digest_claims WHERE digest=? AND owner_token=?")
+                  .run(digest, owner.owner_token);
               }
-              if (active) {
-                try {
-                  process.kill(owner.process_id, 0);
-                } catch (error) {
-                  if (error instanceof Error && "code" in error && error.code === "ESRCH")
-                    active = false;
-                  else if (!(error instanceof Error && "code" in error && error.code === "EPERM"))
-                    throw error;
-                }
-              }
-              if (active) return false;
               claims
-                .prepare("DELETE FROM attachment_digest_claims WHERE digest=? AND owner_token=?")
-                .run(digest, owner.owner_token);
-            }
-            claims
-              .prepare("INSERT INTO attachment_digest_claims VALUES(?,?,?,?,?)")
-              .run(digest, token, process.pid, hostname(), processInstance);
-            return true;
-          });
+                .prepare(`INSERT INTO attachment_digest_claims
+                (digest,owner_token,process_id,hostname,process_instance,coordination_version)
+                VALUES(?,?,?,?,?,1)`)
+                .run(digest, token, process.pid, hostname(), processInstance);
+              return true;
+            });
           if (!acquired) {
             if (performance.now() >= deadline) throw new Error("attachment_digest_wait_timeout");
             await delay(10);
           }
         }
-        processState.activeClaims.add(token);
         return await action();
       },
       async () => {
@@ -146,12 +130,35 @@ export class CommentAttachmentDigestLifecycle {
             }
           },
           async () => {
-            processState.activeClaims.delete(token);
-            claims.close();
+            await withAttachmentCleanup(
+              async () => claims.close(),
+              async () => kernelLock?.close()
+            );
           }
         );
       }
     );
+  }
+
+  private openKernelLock(digest: string): SqliteDatabase {
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (path: string) => SqliteDatabase;
+    };
+    // Never unlink these files: replacing their inode could admit two owners of one digest.
+    const path = join(this.lockDirectory, `${digest}.sqlite`);
+    const database = new DatabaseSync(path);
+    try {
+      chmodSync(path, 0o600);
+      database.exec("PRAGMA locking_mode=EXCLUSIVE; PRAGMA busy_timeout=0;");
+      return database;
+    } catch (error) {
+      try {
+        database.close();
+      } catch (cleanup) {
+        throw withAttachmentCleanupFailure(error, cleanup);
+      }
+      throw error;
+    }
   }
 
   private open(): SqliteDatabase {
@@ -163,7 +170,11 @@ export class CommentAttachmentDigestLifecycle {
       database.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
       return database;
     } catch (error) {
-      database.close();
+      try {
+        database.close();
+      } catch (cleanup) {
+        throw withAttachmentCleanupFailure(error, cleanup);
+      }
       throw error;
     }
   }

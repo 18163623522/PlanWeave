@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { CommentAttachmentDigestLifecycle } from "../attachments/digestLifecycle.js";
 import { openServerDatabase } from "../sqlite.js";
 import { AttachmentProcessHarness } from "./support/commentAttachmentProcessHarness.js";
 import {
@@ -45,7 +48,7 @@ function signal() {
 }
 
 describe("comment attachment multi-process lifecycle", () => {
-  it("serializes independent HTTP instances on the same digest and preserves uploaded bytes", async () => {
+  it("does not steal an active owner when hostname and PID namespace identity differ", async () => {
     let now = new Date("2026-07-24T12:00:00.000Z");
     const stack = await setup({ clock: () => now });
     const token = await bootstrap(stack.origin);
@@ -75,6 +78,17 @@ describe("comment attachment multi-process lifecycle", () => {
         headers: auth(token)
       });
       await child.waitFor("gc-held");
+      const ownerDatabase = await openServerDatabase(
+        join(stack.directory, "comment-attachments", "lifecycle.sqlite"),
+        5000
+      );
+      try {
+        ownerDatabase
+          .prepare("UPDATE attachment_digest_claims SET hostname=?,process_id=? WHERE digest=?")
+          .run("another-container-hostname", process.pid, digest);
+      } finally {
+        ownerDatabase.close();
+      }
       uploading = uploadPending(
         stack.origin,
         token,
@@ -94,10 +108,9 @@ describe("comment attachment multi-process lifecycle", () => {
       );
       try {
         expect(
-          other
-            .prepare("SELECT process_id FROM attachment_digest_claims WHERE digest=?")
-            .get(digest)?.process_id
-        ).not.toBe(process.pid);
+          other.prepare("SELECT hostname FROM attachment_digest_claims WHERE digest=?").get(digest)
+            ?.hostname
+        ).toBe("another-container-hostname");
       } finally {
         other.close();
       }
@@ -118,7 +131,7 @@ describe("comment attachment multi-process lifecycle", () => {
     }
   }, 20000);
 
-  it("recovers a killed publishing owner and finishes through a restarted HTTP instance", async () => {
+  it("recovers a killed publishing owner after persistent volume reuse with a new hostname", async () => {
     const now = new Date("2026-07-24T12:00:00.000Z");
     const stack = await setup({ clock: () => now });
     const token = await bootstrap(stack.origin);
@@ -145,6 +158,17 @@ describe("comment attachment multi-process lifecycle", () => {
           join(stack.directory, "comment-attachments", "sha256", digest.slice(0, 2), digest)
         )
       ).toEqual(bytes);
+      const oldClaims = await openServerDatabase(
+        join(stack.directory, "comment-attachments", "lifecycle.sqlite"),
+        5000
+      );
+      try {
+        oldClaims
+          .prepare("UPDATE attachment_digest_claims SET hostname=?,process_id=? WHERE digest=?")
+          .run("previous-container-hostname", process.pid, digest);
+      } finally {
+        oldClaims.close();
+      }
       await child.crash();
       await uploading;
       restarted = new AttachmentProcessHarness({
@@ -178,4 +202,43 @@ describe("comment attachment multi-process lifecycle", () => {
       await uploading;
     }
   }, 20000);
+
+  it.each([
+    hostname(),
+    "unverified-old-container"
+  ])("fails closed for an unverified legacy owner on %s", async (ownerHostname) => {
+    const stack = await setup();
+    const claims = await openServerDatabase(
+      join(stack.directory, "comment-attachments", "lifecycle.sqlite"),
+      5000
+    );
+    const ownerToken = randomUUID();
+    try {
+      if (
+        claims
+          .prepare("PRAGMA table_info(attachment_digest_claims)")
+          .all()
+          .some((column) => column.name === "coordination_version")
+      ) {
+        claims.exec("ALTER TABLE attachment_digest_claims DROP COLUMN coordination_version");
+      }
+      claims
+        .prepare(`INSERT INTO attachment_digest_claims
+            (digest,owner_token,process_id,hostname,process_instance) VALUES(?,?,?,?,?)`)
+        .run(digest, ownerToken, 2147483647, ownerHostname, randomUUID());
+      const migrated = new CommentAttachmentDigestLifecycle(stack.database, stack.directory);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(migrated.withDigest(digest, async () => "must not enter")).rejects.toThrow(
+          /legacy_owner_unverified.*stop.*drain.*offline/
+        );
+      }
+      expect(
+        claims
+          .prepare("SELECT owner_token FROM attachment_digest_claims WHERE digest=?")
+          .get(digest)?.owner_token
+      ).toBe(ownerToken);
+    } finally {
+      claims.close();
+    }
+  });
 });
