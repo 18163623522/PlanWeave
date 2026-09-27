@@ -117,19 +117,23 @@ export function createFileOAuthTokenStore(path: string): OAuthTokenStore {
     operation: (nextTokens: Map<string, StoredOAuthToken>) => T
   ): Promise<T> {
     await load();
-    let result: T;
     const write = async () => {
       const nextTokens = new Map(tokens);
-      result = operation(nextTokens);
+      const result = operation(nextTokens);
       await persist(nextTokens);
       tokens.clear();
       for (const token of nextTokens.values()) {
         tokens.set(token.tokenHash, token);
       }
+      return result;
     };
-    writePromise = writePromise.then(write, write);
-    await writePromise;
-    return result!;
+    const pendingWrite = writePromise.then(write);
+    // The queue tracks settlement; the caller retains the operation's rejection.
+    writePromise = pendingWrite.then(
+      () => undefined,
+      () => undefined
+    );
+    return pendingWrite;
   }
 
   return {

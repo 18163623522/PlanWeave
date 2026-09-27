@@ -1,4 +1,4 @@
-import { chmod, mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 let tempFileCounter = 0;
@@ -10,14 +10,21 @@ export async function writePrivateJsonFile(path: string, value: unknown): Promis
     dir,
     `.${basename(path)}-${process.pid}-${Date.now()}-${tempFileCounter++}.tmp`
   );
-  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600
-  });
-  await rename(tempPath, path);
-  const written = await stat(path);
-  if ((written.mode & 0o777) !== 0o600) {
-    await chmod(path, 0o600);
+  try {
+    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    const written = await stat(tempPath);
+    if ((written.mode & 0o777) !== 0o600) {
+      await chmod(tempPath, 0o600);
+    }
+    await rename(tempPath, path);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch((cleanupError: unknown) => {
+      console.error("[planweave-mcp] failed to remove OAuth temporary file", cleanupError);
+    });
+    throw error;
   }
 }
 

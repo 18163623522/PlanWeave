@@ -1,13 +1,20 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFileOAuthClientStore, type RegisteredClient } from "../oauthClientStore.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, stat: vi.fn(actual.stat) };
+});
+
+const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
 const tempDirs: string[] = [];
 const supportsPosixModeAssertions = process.platform !== "win32";
 
 afterEach(async () => {
+  vi.mocked(stat).mockReset();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -42,6 +49,23 @@ async function expectPrivateStorePermissions(path: string): Promise<void> {
 }
 
 describe("file OAuth client store", () => {
+  it("completes publication without a fallible target-file permission check", async () => {
+    const path = await createTempStorePath();
+    const store = createFileOAuthClientStore(path);
+    const client = registeredClient();
+    vi.mocked(stat).mockImplementation(async (...args) => {
+      if (String(args[0]) === path) throw new Error("target metadata unavailable");
+      return actualFs.stat(...args);
+    });
+
+    await expect(store.set(client)).resolves.toBeUndefined();
+    await expect(store.get(client.clientId)).resolves.toEqual(client);
+    await expect(createFileOAuthClientStore(path).get(client.clientId)).resolves.toEqual(client);
+    if (supportsPosixModeAssertions) {
+      expect((await actualFs.stat(path)).mode & 0o777).toBe(0o600);
+    }
+  });
+
   it("writes clients with private file and corrected directory permissions", async () => {
     const storePath = await createTempStorePath();
     const storeDir = dirname(storePath);

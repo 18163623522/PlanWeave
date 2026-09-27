@@ -1,16 +1,23 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPlanweaveMcpHttpServer } from "../server.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
+
 let server: Server | undefined;
+let tokenStorePath: string;
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.mocked(writeFile).mockReset();
   if (server) {
     await new Promise<void>((resolve, reject) => {
       server?.close((error) => (error ? reject(error) : resolve()));
@@ -23,13 +30,14 @@ afterEach(async () => {
 async function startOAuthServer(): Promise<string> {
   const storeDir = await mkdtemp(join(tmpdir(), "planweave-oauth-refresh-"));
   tempDirs.push(storeDir);
+  tokenStorePath = join(storeDir, "tokens.json");
   server = createPlanweaveMcpHttpServer({
     host: "127.0.0.1",
     maxRequestBodyBytes: 1_048_576,
     oauth: {
       enabled: true,
       clientStorePath: join(storeDir, "clients.json"),
-      tokenStorePath: join(storeDir, "tokens.json")
+      tokenStorePath
     },
     port: 0,
     planweaveHomeFromEnv: true,
@@ -166,16 +174,44 @@ describe("PlanWeave MCP OAuth refresh flow", () => {
     expect(wrongClientResponse.status).toBe(400);
     await expect(wrongClientResponse.json()).resolves.toEqual({ error: "invalid_grant" });
 
-    const refreshResponse = await fetch(`${baseUrl}/oauth/token`, {
-      method: "POST",
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: tokens.refresh_token,
-        client_id: registration.client_id,
-        resource: `${baseUrl}/mcp`
-      }),
-      headers: { "content-type": "application/x-www-form-urlencoded" }
+    const committed = await readFile(tokenStorePath, "utf8");
+    const failure = Object.assign(new Error("injected OAuth token write failure"), {
+      code: "ENOSPC"
     });
+    vi.mocked(writeFile).mockRejectedValueOnce(failure);
+    const requestRefresh = () =>
+      fetch(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: tokens.refresh_token,
+          client_id: registration.client_id,
+          resource: `${baseUrl}/mcp`
+        }),
+        headers: { "content-type": "application/x-www-form-urlencoded" }
+      });
+    const failedRefresh = await requestRefresh();
+    expect(failedRefresh.status).toBe(500);
+    expect(await failedRefresh.json()).not.toHaveProperty("access_token");
+    expect(await readFile(tokenStorePath, "utf8")).toBe(committed);
+
+    const existingBearer = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }),
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${tokens.access_token}`,
+        "content-type": "application/json"
+      }
+    });
+    expect(existingBearer.status).toBe(200);
+    await expect(readMcpResponse(existingBearer)).resolves.toHaveProperty("result.tools");
+
+    const responses = await Promise.all([requestRefresh(), requestRefresh()]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    const refreshResponse = responses.find((response) => response.status === 200)!;
+    const rejectedRefresh = responses.find((response) => response.status === 400)!;
+    await expect(rejectedRefresh.json()).resolves.toEqual({ error: "invalid_grant" });
     expect(refreshResponse.status).toBe(200);
     const refreshed = (await refreshResponse.json()) as {
       access_token: string;
@@ -183,19 +219,6 @@ describe("PlanWeave MCP OAuth refresh flow", () => {
     };
     expect(refreshed.access_token).not.toBe(tokens.access_token);
     expect(refreshed.refresh_token).not.toBe(tokens.refresh_token);
-
-    const reusedRefreshResponse = await fetch(`${baseUrl}/oauth/token`, {
-      method: "POST",
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: tokens.refresh_token,
-        client_id: registration.client_id,
-        resource: `${baseUrl}/mcp`
-      }),
-      headers: { "content-type": "application/x-www-form-urlencoded" }
-    });
-    expect(reusedRefreshResponse.status).toBe(400);
-    await expect(reusedRefreshResponse.json()).resolves.toEqual({ error: "invalid_grant" });
 
     const toolsResponse = await fetch(`${baseUrl}/mcp`, {
       method: "POST",
