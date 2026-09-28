@@ -1,3 +1,8 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -66,6 +71,85 @@ async function readMcpResponse(response: Response): Promise<unknown> {
 }
 
 describe("PlanWeave MCP HTTP server", () => {
+  it.each([
+    false,
+    true
+  ])("rejects malformed native HTTP targets and stays alive (OAuth=%s)", async (oauthEnabled) => {
+    const storeDir = await mkdtemp(join(tmpdir(), "planweave-mcp-target-"));
+    const config: McpConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      maxRequestBodyBytes: 1_048_576,
+      token: "secret-token",
+      planweaveHomeFromEnv: true,
+      trustForwardedHeaders: false,
+      oauth: {
+        enabled: oauthEnabled,
+        clientStorePath: join(storeDir, "clients.json"),
+        tokenStorePath: join(storeDir, "tokens.json")
+      }
+    };
+    // An uncaught request callback exception must terminate only this isolated server process.
+    const script = `
+        import assert from "node:assert/strict";
+        import { request } from "node:http";
+        import { createPlanweaveMcpHttpServer } from ${JSON.stringify(new URL("../server.ts", import.meta.url).href)};
+        const server = createPlanweaveMcpHttpServer(${JSON.stringify(config)});
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", resolve);
+        });
+        const port = server.address().port;
+        const baseUrl = "http://127.0.0.1:" + port;
+        const nativeRequest = (path, method = "GET", headers = {}) => new Promise((resolve, reject) => {
+          const req = request({ hostname: "127.0.0.1", port, path, method, headers }, (res) => {
+            let body = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk) => { body += chunk; });
+            res.on("error", reject);
+            res.on("end", () => resolve({ status: res.statusCode, body }));
+          });
+          req.on("error", reject);
+          req.end();
+        });
+        try {
+          const malformed = await nativeRequest("//[", "GET", { authorization: "Bearer secret-token" });
+          assert.equal(malformed.status, 400);
+          assert.deepEqual(JSON.parse(malformed.body), { error: "invalid_request_target" });
+          const health = await nativeRequest(baseUrl + "/healthz?check=1");
+          assert.equal(health.status, 200);
+          assert.equal(JSON.parse(health.body).status, "ok");
+          const unauthorized = await nativeRequest("/mcp", "POST", { authorization: "Bearer wrong-token" });
+          assert.equal(unauthorized.status, 401);
+          const badHost = await nativeRequest("/mcp", "POST", { host: "evil.example" });
+          assert.equal(badHost.status, 421);
+          const badOrigin = await nativeRequest("/mcp", "POST", { origin: "https://evil.example" });
+          assert.equal(badOrigin.status, 403);
+          if (${oauthEnabled}) {
+            const discovery = await nativeRequest("/.well-known/oauth-authorization-server");
+            assert.equal(discovery.status, 200);
+            assert.equal(JSON.parse(discovery.body).issuer, baseUrl);
+          }
+          console.log("native-target-400; health-200; auth-401; host-421; origin-403");
+        } finally {
+          await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        }
+      `;
+    try {
+      const result = await promisify(execFile)(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "--eval", script],
+        { cwd: process.cwd(), timeout: 15_000 }
+      );
+      expect(result.stderr).toBe("");
+      expect(result.stdout.trim()).toBe(
+        "native-target-400; health-200; auth-401; host-421; origin-403"
+      );
+    } finally {
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("serves unauthenticated health checks without secrets", async () => {
     const baseUrl = await startServer("secret-token");
 

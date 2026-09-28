@@ -179,7 +179,13 @@ export function createPlanweaveMcpHttpServer(
         })
       : null;
   return createServer((req, res) => {
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    let path: string;
+    try {
+      path = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      writeJson(res, 400, { error: "invalid_request_target" });
+      return;
+    }
     if (oauth) {
       void (async () => {
         try {
