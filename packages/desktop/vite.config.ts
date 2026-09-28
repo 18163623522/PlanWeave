@@ -165,6 +165,15 @@ export default defineConfig({
               priority: 13
             },
             {
+              // Search state stays mounted in the shell; its view retains its lazy route.
+              name: "search-controller",
+              test: (id) =>
+                id.endsWith("/renderer/controllers/SearchController.ts") ||
+                id.endsWith("/renderer/hooks/useDesktopSearch.ts") ||
+                id.endsWith("/renderer/hooks/useSearchInvalidation.ts"),
+              priority: 14
+            },
+            {
               // Settings is a secondary route with several independent administration
               // surfaces. Keep it out of the startup shell while preserving its lazy
               // Host administration boundary.
