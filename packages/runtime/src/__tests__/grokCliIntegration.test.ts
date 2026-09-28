@@ -6,6 +6,7 @@ import type { CliProcessExecutor, CliProcessRequest } from "../autoRun/cliProces
 import { grokAgentDefinition } from "../autoRun/grokIntegration.js";
 import { createGrokExecAdapter, getAutoRunStatus } from "../index.js";
 import { executorProfileSchema } from "../types.js";
+import { claimNext } from "../taskManager/index.js";
 import { createTestWorkspace } from "./promptTestHelpers.js";
 
 function successfulProcess(
@@ -82,6 +83,10 @@ describe("Grok CLI integration", () => {
 
   it("passes the canonical prompt by file without copying it into argv or stdin", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     let observedRequest: CliProcessRequest | null = null;
     const runner = createCliRunner({
       executeProcess: successfulProcess((request) => {
@@ -97,14 +102,7 @@ describe("Grok CLI integration", () => {
     const result = await runner.runBlock(
       {
         projectRoot: init.workspace,
-        claim: {
-          kind: "block",
-          ref: "T-001#B-001",
-          taskId: "T-001",
-          blockId: "B-001",
-          blockType: "implementation",
-          effectiveExecutor: "grok"
-        },
+        claim,
         prompt,
         executorName: "grok",
         profile

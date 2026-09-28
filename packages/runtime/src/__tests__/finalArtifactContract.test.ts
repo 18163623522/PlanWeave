@@ -28,6 +28,7 @@ import {
   runTerminalAgentProtocolFeedback
 } from "../autoRun/terminalAgentExecutor.js";
 import type { CliProcessExecutor } from "../autoRun/cliProcess.js";
+import { claimNext } from "../taskManager/index.js";
 import { createTestWorkspace } from "./promptTestHelpers.js";
 import { getRunRecord } from "../desktop/index.js";
 
@@ -551,6 +552,10 @@ describe("terminal artifact materialization ordering", () => {
 
   it("stores a verified implementation reference before returning the existing report path", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const executeProcess: CliProcessExecutor = async () => ({
       stdout: "implemented\n",
       stderr: "",
@@ -560,14 +565,7 @@ describe("terminal artifact materialization ordering", () => {
     });
     const result = await runTerminalAgentProtocolBlock({
       projectRoot: init.workspace,
-      claim: {
-        kind: "block",
-        ref: "T-001#B-001",
-        taskId: "T-001",
-        blockId: "B-001",
-        blockType: "implementation",
-        effectiveExecutor: "codex"
-      },
+      claim,
       prompt: "implement",
       executorName: "codex",
       profile,
@@ -603,6 +601,10 @@ describe("terminal artifact materialization ordering", () => {
 
   it("records metadata failure when implementation materialization itself fails", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const executeProcess: CliProcessExecutor = async (request) => {
       await mkdir(join(dirname(request.stdoutPath), "report.md"));
       return { stdout: "implemented", stderr: "", exitCode: 0, timedOut: false, tmux: null };
@@ -610,14 +612,7 @@ describe("terminal artifact materialization ordering", () => {
     await expect(
       runTerminalAgentProtocolBlock({
         projectRoot: init.workspace,
-        claim: {
-          kind: "block",
-          ref: "T-001#B-001",
-          taskId: "T-001",
-          blockId: "B-001",
-          blockType: "implementation",
-          effectiveExecutor: "codex"
-        },
+        claim,
         prompt: "implement",
         executorName: "codex",
         profile,
@@ -642,6 +637,10 @@ describe("terminal artifact materialization ordering", () => {
 
   it("materializes implementation through the codec and fails oversized content before success", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const executeProcess: CliProcessExecutor = async () => ({
       stdout: "x".repeat(FINAL_ARTIFACT_MAX_CONTENT_BYTES + 1),
       stderr: "",
@@ -652,14 +651,7 @@ describe("terminal artifact materialization ordering", () => {
     await expect(
       runTerminalAgentProtocolBlock({
         projectRoot: init.workspace,
-        claim: {
-          kind: "block",
-          ref: "T-001#B-001",
-          taskId: "T-001",
-          blockId: "B-001",
-          blockType: "implementation",
-          effectiveExecutor: "codex"
-        },
+        claim,
         prompt: "implement",
         executorName: "codex",
         profile,

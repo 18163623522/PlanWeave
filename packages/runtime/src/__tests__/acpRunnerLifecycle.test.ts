@@ -8,6 +8,7 @@ import { AcpSessionController, type AcpSessionRun } from "../autoRun/acpSessionC
 import { createAcpConnection, type CreateAcpConnectionOptions } from "../autoRun/acpConnection.js";
 import type { AgentDefinition } from "../autoRun/agentRunner.js";
 import { getExecutionStatus } from "../taskManager/executionStatus.js";
+import { claimNext } from "../taskManager/index.js";
 import { createTestWorkspace } from "./promptTestHelpers.js";
 import { manifestTestBuilder } from "./manifestTestBuilder.js";
 import { acpProfileTestValues } from "./support/acpProfileTestValues.js";
@@ -408,8 +409,13 @@ describe("ACP runner runtime limits", () => {
     expectedTimeoutMs
   }) => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const controller = new AcpSessionController(new ActiveAgentRunRegistry());
-    const execute = vi.spyOn(controller, "execute").mockRejectedValue(new Error("captured"));
+    const capturedError = new Error("captured");
+    const execute = vi.spyOn(controller, "execute").mockRejectedValue(capturedError);
     const runner = createMockAcpRunner("artifact-implementation", {
       sessionController: controller
     });
@@ -439,14 +445,7 @@ describe("ACP runner runtime limits", () => {
       runner.runBlock(
         {
           projectRoot: init.workspace,
-          claim: {
-            kind: "block",
-            ref: "T-001#B-001",
-            taskId: "T-001",
-            blockId: "B-001",
-            blockType: "implementation",
-            effectiveExecutor: "codex-acp"
-          },
+          claim,
           prompt: "implement",
           executorName: "codex-acp",
           profile: runtimeProfile,
@@ -454,7 +453,7 @@ describe("ACP runner runtime limits", () => {
         },
         runtimeDefinition
       )
-    ).rejects.toThrow("captured");
+    ).rejects.toBe(capturedError);
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -469,8 +468,13 @@ describe("ACP runner runtime limits", () => {
 
   it("prefers a call-level timeout over the executor profile timeout", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const controller = new AcpSessionController(new ActiveAgentRunRegistry());
-    const execute = vi.spyOn(controller, "execute").mockRejectedValue(new Error("captured"));
+    const capturedError = new Error("captured");
+    const execute = vi.spyOn(controller, "execute").mockRejectedValue(capturedError);
     const runner = createMockAcpRunner("artifact-implementation", {
       sessionController: controller
     });
@@ -496,14 +500,7 @@ describe("ACP runner runtime limits", () => {
       runner.runBlock(
         {
           projectRoot: init.workspace,
-          claim: {
-            kind: "block",
-            ref: "T-001#B-001",
-            taskId: "T-001",
-            blockId: "B-001",
-            blockType: "implementation",
-            effectiveExecutor: "codex-acp"
-          },
+          claim,
           prompt: "implement",
           executorName: "codex-acp",
           profile: runtimeProfile,
@@ -512,7 +509,7 @@ describe("ACP runner runtime limits", () => {
         },
         runtimeDefinition
       )
-    ).rejects.toThrow("captured");
+    ).rejects.toBe(capturedError);
 
     expect(execute).toHaveBeenCalledWith(
       expect.any(Object),
@@ -529,7 +526,8 @@ describe("ACP runner runtime limits", () => {
   }) => {
     const { init } = await createTestWorkspace();
     const controller = new AcpSessionController(new ActiveAgentRunRegistry());
-    const execute = vi.spyOn(controller, "execute").mockRejectedValue(new Error("captured"));
+    const capturedError = new Error("captured");
+    const execute = vi.spyOn(controller, "execute").mockRejectedValue(capturedError);
     const runner = createMockAcpRunner("artifact-implementation", {
       sessionController: controller
     });
@@ -574,7 +572,7 @@ describe("ACP runner runtime limits", () => {
         },
         runtimeDefinition
       )
-    ).rejects.toThrow("captured");
+    ).rejects.toBe(capturedError);
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({

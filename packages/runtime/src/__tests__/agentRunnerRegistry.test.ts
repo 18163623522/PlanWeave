@@ -15,6 +15,7 @@ import {
 import { createCodexExecAdapter, listExecutorProfilesForManifest } from "../autoRun/executors.js";
 import { registeredAgentRunners, resolveAgentRunner } from "../autoRun/runnerRegistry.js";
 import { executorProfileSchema, type AgentExecutorProfile, type AgentFamily } from "../types.js";
+import { claimNext } from "../taskManager/index.js";
 import { createTestWorkspace } from "./promptTestHelpers.js";
 import { manifestTestBuilder } from "./manifestTestBuilder.js";
 import { acpProfileResolverTestDouble } from "./support/acpProfileTestValues.js";
@@ -552,6 +553,10 @@ describe("AgentRunner registries", () => {
 
   it("executes a custom ACP profile through the resolved profile launch", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const definition: AgentDefinition = {
       agent: "custom-agent",
       builtinProfiles: {},
@@ -577,7 +582,7 @@ describe("AgentRunner registries", () => {
       runner.runBlock(
         {
           projectRoot: init.workspace,
-          claim: blockClaim,
+          claim,
           prompt: "custom ACP execution",
           executorName: "custom-acp",
           profile: {
@@ -689,6 +694,10 @@ describe("AgentRunner registries", () => {
 
   it("applies Desktop ACP session defaults only when desktopRunId identifies the origin", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const settingsFile = join(init.workspace.rootPath, "desktop-settings.json");
     await writeFile(
       settingsFile,
@@ -710,7 +719,7 @@ describe("AgentRunner registries", () => {
         runnerForDefinition(probeDefinition("artifact-session-config")).runBlock(
           {
             projectRoot: init.workspace,
-            claim: blockClaim,
+            claim,
             prompt: "desktop ACP execution",
             executorName: "codex-acp",
             profile: { adapter: "agent", agent: "codex", runner: { transport: "acp" } },
@@ -731,6 +740,10 @@ describe("AgentRunner registries", () => {
 
   it("does not treat a non-Desktop runSessionId as Desktop settings authority", async () => {
     const { init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const settingsFile = join(init.workspace.rootPath, "desktop-settings-invalid.json");
     await writeFile(settingsFile, "invalid desktop settings");
     const previous = process.env.PLANWEAVE_DESKTOP_SETTINGS_FILE;
@@ -740,7 +753,7 @@ describe("AgentRunner registries", () => {
         runnerForDefinition(probeDefinition("artifact-implementation")).runBlock(
           {
             projectRoot: init.workspace,
-            claim: blockClaim,
+            claim,
             prompt: "non-Desktop ACP execution",
             executorName: "codex-acp",
             profile: { adapter: "agent", agent: "codex", runner: { transport: "acp" } },

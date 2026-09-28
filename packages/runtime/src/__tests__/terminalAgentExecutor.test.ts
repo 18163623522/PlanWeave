@@ -7,6 +7,7 @@ import { claudeCodeAgentDefinition } from "../autoRun/claudeCodeIntegration.js";
 import { cliRunner, createCliRunner } from "../autoRun/cliRunner.js";
 import { ExecutorCancelledError } from "../autoRun/executorShared.js";
 import { piAgentDefinition } from "../autoRun/piIntegration.js";
+import { claimNext } from "../taskManager/index.js";
 import { createTestWorkspace } from "./promptTestHelpers.js";
 import { manifestTestBuilder } from "./manifestTestBuilder.js";
 
@@ -67,20 +68,17 @@ describe("terminal agent executors", () => {
       args: ["-e", "setTimeout(() => {}, 60_000)"]
     };
     const blockWorkspace = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: blockWorkspace.init.workspace });
+    if (claim.kind !== "block" || claim.blockType !== "implementation") {
+      throw new Error("Expected implementation claim.");
+    }
     const feedbackWorkspace = await createTestWorkspace();
 
     await expect(
       runner.runBlock(
         {
           projectRoot: blockWorkspace.init.workspace,
-          claim: {
-            kind: "block",
-            ref: "T-001#B-001",
-            taskId: "T-001",
-            blockId: "B-001",
-            blockType: "implementation",
-            effectiveExecutor: "cancelled-terminal"
-          },
+          claim,
           prompt: "Implement task",
           executorName: "cancelled-terminal",
           profile,
