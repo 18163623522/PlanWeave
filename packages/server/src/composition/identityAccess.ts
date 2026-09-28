@@ -177,7 +177,10 @@ export function createIdentityAccessComposition(input: {
     projectAccess,
     input.config.dataDirectory,
     input.packageSnapshotRuntime,
-    input.clock
+    input.clock,
+    (error, canvasRegistryId) => {
+      console.error("snapshot_retention_cleanup_failed", { canvasRegistryId, error });
+    }
   );
   const collaborationScopeAuthority = createRegistryCollaborationScopeAuthority(
     projectAccess.registry

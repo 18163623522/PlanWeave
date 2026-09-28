@@ -64,7 +64,11 @@ export class PackageSnapshotRepository {
     private readonly access: ProjectAccessRepository,
     private readonly dataDirectory: string,
     private readonly runtime: CanvasPackageSnapshotRuntimePort,
-    private readonly clock: () => Date = () => new Date()
+    private readonly clock: () => Date = () => new Date(),
+    private readonly onRetentionCleanupError: (error: unknown, canvasRegistryId: string) => void = (
+      error,
+      canvasRegistryId
+    ) => console.error("snapshot_retention_cleanup_failed", { canvasRegistryId, error })
   ) {}
 
   async create(input: {
@@ -345,13 +349,14 @@ export class PackageSnapshotRepository {
       }
     };
 
-    const resultAfterFailure = (input: {
+    const resultAfterFailure = async (input: {
       outcome: "conflict" | "malformed";
       detail: string;
       state: "available" | "malformed";
       aggregate: boolean;
-    }): RestorePackageSnapshotResult => {
+    }): Promise<RestorePackageSnapshotResult> => {
       const recovered = input.aggregate ? false : recoverMarker(input.state);
+      if (recovered) await this.cleanupAfterRestore(snapshot.immutable.registry.canvasRegistryId);
       return restorePackageSnapshotResultSchema.parse({
         ...base,
         outcome: recovered && !input.aggregate ? input.outcome : "malformed",
@@ -473,6 +478,7 @@ export class PackageSnapshotRepository {
         restoredAt: null,
         detail: "restore_completion_conflict"
       });
+    await this.cleanupAfterRestore(snapshot.immutable.registry.canvasRegistryId);
     return restorePackageSnapshotResultSchema.parse({
       ...base,
       outcome: "restored",
@@ -481,6 +487,19 @@ export class PackageSnapshotRepository {
       restoredAt,
       detail: null
     });
+  }
+
+  private async cleanupAfterRestore(canvasRegistryId: string): Promise<void> {
+    try {
+      await enforcePackageSnapshotRetention(
+        this.database,
+        this.dataDirectory,
+        canvasRegistryId,
+        this.clock().toISOString()
+      );
+    } catch (error) {
+      this.onRetentionCleanupError(error, canvasRegistryId);
+    }
   }
 
   async revoke(input: {

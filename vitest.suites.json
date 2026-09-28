@@ -950,6 +950,7 @@
         "ownerCanvasMaterializationRepository.test.ts",
         "ownerCanvasMaterializationService.test.ts",
         "packageSnapshotRepository.test.ts",
+        "packageSnapshotRetention.test.ts",
         "pathlessCommentActivityComposition.test.ts",
         "presenceHub.test.ts",
         "presenceWebSocket.test.ts",
