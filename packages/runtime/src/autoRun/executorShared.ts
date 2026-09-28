@@ -42,7 +42,14 @@ export { ExecutorCancelledError, isExecutorCancelledError } from "./executorCanc
 export type BlockClaim = Extract<ClaimResult, { kind: "block" }>;
 export type FeedbackClaim = Extract<ClaimResult, { kind: "feedback" }>;
 
-export class ExecutorAlreadyAdmittedError extends Error {
+export class ExecutorClaimRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecutorClaimRejectedError";
+  }
+}
+
+export class ExecutorAlreadyAdmittedError extends ExecutorClaimRejectedError {
   constructor(readonly runId: string) {
     super(
       `Automatic execution for '${runId}' is already admitted; reclaim before starting a new execution.`
@@ -361,9 +368,11 @@ export async function prepareBlockRun(options: {
       const current = state.blocks[options.claim.ref];
       if (
         current?.status !== "in_progress" ||
-        current.submissionAttemptId !== submissionAttemptId
+        current.submissionAttemptId !== submissionAttemptId ||
+        !state.currentRefs.includes(options.claim.ref) ||
+        current.remoteOwnership
       ) {
-        throw new Error(
+        throw new ExecutorClaimRejectedError(
           `Executor claim '${options.claim.ref}' attempt conflicts with current state.`
         );
       }
@@ -385,7 +394,7 @@ export async function prepareBlockRun(options: {
         metadata.adapter !== options.adapter ||
         typeof metadata.startedAt !== "string"
       ) {
-        throw new Error(
+        throw new ExecutorClaimRejectedError(
           `Prepared run '${existingRunId}' identity conflicts with executor preparation.`
         );
       }

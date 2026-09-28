@@ -7,7 +7,7 @@ import {
   resolveExecutorRunnerEvidence
 } from "../autoRun/executors.js";
 import {
-  ExecutorAlreadyAdmittedError,
+  ExecutorClaimRejectedError,
   ExecutorCancelledError,
   isExecutorCancelledError
 } from "../autoRun/executorShared.js";
@@ -24,7 +24,8 @@ import type {
   ExecutionGraphSession,
   ExecutorAdapter,
   ExecutorAdapterResult,
-  PlanPackageManifest
+  PlanPackageManifest,
+  RuntimeState
 } from "../types.js";
 import type { PackageWorkspaceRef } from "../types.js";
 import { patchFeedbackArtifact } from "./feedbackArtifacts.js";
@@ -175,6 +176,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function ownsWritableBlockClaim(
+  state: RuntimeState,
+  ref: string,
+  submissionAttemptId: string | undefined
+): boolean {
+  const current = state.blocks[ref];
+  return (
+    current?.status === "in_progress" &&
+    state.currentRefs.includes(ref) &&
+    !current.remoteOwnership &&
+    (submissionAttemptId === undefined || current.submissionAttemptId === submissionAttemptId)
+  );
+}
+
 async function runnerEvidence(options: {
   projectRoot: PackageWorkspaceRef;
   executorName: string;
@@ -203,10 +218,7 @@ async function markBlockPipelineFailure(options: {
         `${reason}; failed to mark the block blocked: ${errorMessage(cleanupError)}`
       );
     });
-    if (
-      options.submissionAttemptId !== undefined &&
-      current.state.blocks[options.ref]?.submissionAttemptId !== options.submissionAttemptId
-    )
+    if (!ownsWritableBlockClaim(current.state, options.ref, options.submissionAttemptId))
       throw options.error;
     try {
       const blocked = await markBlockBlocked({ ...options, reason });
@@ -394,7 +406,7 @@ async function executeBlockClaim(options: {
       : await submitBlockResult(submissionOptions);
     return { kind: "submitted", claim: options.claim, adapterResult, submitResult };
   } catch (error) {
-    if (error instanceof ExecutorAlreadyAdmittedError) throw error;
+    if (error instanceof ExecutorClaimRejectedError) throw error;
     if (isExecutorCancelledError(error)) {
       const { workspace } = await loadPackage(options.projectRoot);
       return withCanvasLock(dirname(workspace.stateFile), async () => {
@@ -403,9 +415,11 @@ async function executeBlockClaim(options: {
           session: options.session
         });
         if (
-          options.claim.submissionAttemptId !== undefined &&
-          current.state.blocks[options.claim.ref]?.submissionAttemptId !==
+          !ownsWritableBlockClaim(
+            current.state,
+            options.claim.ref,
             options.claim.submissionAttemptId
+          )
         )
           throw error;
         await releaseInProgressBlock({
@@ -478,13 +492,7 @@ async function releaseBatchRefIfInProgress(options: {
       projectRoot: options.projectRoot,
       session: options.session
     });
-    const current = context.state.blocks[options.ref];
-    if (
-      current?.status !== "in_progress" ||
-      (options.submissionAttemptId !== undefined &&
-        current.submissionAttemptId !== options.submissionAttemptId)
-    )
-      return;
+    if (!ownsWritableBlockClaim(context.state, options.ref, options.submissionAttemptId)) return;
     await releaseInProgressBlock(options);
   });
 }
@@ -567,12 +575,12 @@ export async function runAutoRunStep(options: {
     const steps: SubmittedOrManualStep[] = [];
     const blockedSteps: BlockedStep[] = [];
     const executionErrors: unknown[] = [];
-    const admittedRefs = new Set<string>();
+    const rejectedRefs = new Set<string>();
     for (const [index, result] of settled.entries()) {
       if (result.status === "rejected") {
         executionErrors.push(result.reason);
-        if (result.reason instanceof ExecutorAlreadyAdmittedError)
-          admittedRefs.add(claim.refs[index]);
+        if (result.reason instanceof ExecutorClaimRejectedError)
+          rejectedRefs.add(claim.refs[index]);
       } else if (result.value.kind === "blocked") {
         blockedSteps.push(result.value);
       } else {
@@ -584,7 +592,7 @@ export async function runAutoRunStep(options: {
     }
     const cleanupResults = await Promise.allSettled(
       claim.refs
-        .filter((ref) => !admittedRefs.has(ref))
+        .filter((ref) => !rejectedRefs.has(ref))
         .map((ref) =>
           releaseBatchRefIfInProgress({
             projectRoot: options.projectRoot,

@@ -11,7 +11,7 @@ import {
   trustCommand
 } from "../index.js";
 import { optionalReadFile } from "../fs/optionalFile.js";
-import { prepareBlockRun } from "../autoRun/executorShared.js";
+import { ExecutorCancelledError, prepareBlockRun } from "../autoRun/executorShared.js";
 import { readState } from "../state.js";
 import * as json from "../json.js";
 import { readJsonFile, writeJsonFile } from "../json.js";
@@ -20,6 +20,85 @@ import { manifestTestBuilder } from "./manifestTestBuilder.js";
 import { createContractCodexExecAdapter, runContractAutoRunStep } from "./autoRunTestBuilders.js";
 
 describe("Auto Run codex executor", () => {
+  it.each([
+    { batch: false, outcome: "prepare" },
+    { batch: true, outcome: "prepare" },
+    { batch: false, outcome: "failure" },
+    { batch: true, outcome: "failure" },
+    { batch: false, outcome: "cancel" },
+    { batch: true, outcome: "cancel" }
+  ])("preserves a completed owner after a late duplicate $outcome (batch=$batch)", async ({
+    batch,
+    outcome
+  }) => {
+    const manifest = manifestTestBuilder({ parallel: true, maxConcurrent: 2 })
+      .withExecutor("fake-codex", {
+        adapter: "codex-exec",
+        command: process.execPath,
+        args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => console.log('done'));"]
+      })
+      .withDefaultExecutor("fake-codex")
+      .build();
+    const { root, init } = await createTestWorkspace(manifest);
+    const adapter = createContractCodexExecAdapter({
+      projectRoot: root,
+      executorName: "fake-codex"
+    });
+    const runRoot = join(init.workspace.resultsDir, "T-001", "blocks", "B-001", "runs");
+    const metadataPath = join(runRoot, "RUN-001", "metadata.json");
+    const reportPath = join(runRoot, "RUN-001", "report.md");
+    let completedState: Awaited<ReturnType<typeof readState>> | undefined;
+    let metadata: string | undefined;
+    let report: string | undefined;
+    const delayedError =
+      outcome === "cancel"
+        ? new ExecutorCancelledError("late duplicate cancelled")
+        : new Error("late duplicate failed");
+    const duplicate = await runContractAutoRunStep({
+      projectRoot: root,
+      parallel: batch,
+      executor: {
+        async runBlock(input) {
+          const owner = await runContractAutoRunStep({ projectRoot: root, executor: adapter });
+          expect(owner).toMatchObject({ kind: "submitted", submitResult: { runId: "RUN-001" } });
+          completedState = await readState(init.workspace.stateFile);
+          expect(completedState.blocks["T-001#B-001"]).toMatchObject({
+            status: "completed",
+            lastRunId: "RUN-001",
+            submissionAttemptId: input.claim.submissionAttemptId
+          });
+          expect(completedState.blocks["T-001#R-001"].status).toBe("ready");
+          metadata = await readFile(metadataPath, "utf8");
+          report = await readFile(reportPath, "utf8");
+          if (outcome !== "prepare") throw delayedError;
+          return adapter.runBlock(input);
+        },
+        async runFeedback() {
+          throw new Error("unexpected feedback");
+        }
+      }
+    }).then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error })
+    );
+    expect((await readState(init.workspace.stateFile)).blocks["T-001#B-001"].status).toBe(
+      "completed"
+    );
+    expect(await readState(init.workspace.stateFile)).toEqual(completedState);
+    expect(await readFile(metadataPath, "utf8")).toBe(metadata);
+    expect(await readFile(reportPath, "utf8")).toBe(report);
+    expect(report).toContain("done");
+    expect((await readdir(runRoot)).filter((name) => !name.startsWith("."))).toEqual(["RUN-001"]);
+    expect(duplicate.value).toBeUndefined();
+    const error =
+      batch && duplicate.error instanceof AggregateError
+        ? duplicate.error.errors[0]
+        : duplicate.error;
+    if (outcome === "prepare")
+      expect(error).toMatchObject({ message: expect.stringContaining("attempt conflicts") });
+    else expect(error).toBe(delayedError);
+  });
+
   it.each([
     false,
     true
