@@ -8,7 +8,6 @@ import {
 } from "react";
 import type {
   DesktopGraphViewModel,
-  DesktopProjectSnapshot,
   DesktopProjectSummary,
   ValidationIssue,
   ProjectPromptPolicy
@@ -22,18 +21,26 @@ import type {
 } from "./useDesktopProjectSnapshot";
 
 type UseDesktopProjectLoaderArgs = {
+  beginProjectRequest: ReturnType<
+    typeof import("./useDesktopProjectSnapshot").useDesktopProjectSnapshot
+  >["beginProjectRequest"];
   autoSelectInitialProject: boolean;
-  applyDesktopProjectSnapshot: (
-    snapshot: DesktopProjectSnapshot,
-    options?: ApplyDesktopProjectSnapshotOptions
-  ) => string[];
+  beginSnapshotRequest: ReturnType<
+    typeof import("./useDesktopProjectSnapshot").useDesktopProjectSnapshot
+  >["beginSnapshotRequest"];
+  applyDesktopProjectSnapshot: ReturnType<
+    typeof import("./useDesktopProjectSnapshot").useDesktopProjectSnapshot
+  >["applyDesktopProjectSnapshot"];
   clearProjectState: () => void;
   currentCanvasRef: MutableRefObject<CurrentDesktopCanvasRef>;
   initialProjectPath: string;
-  refreshDesktopGraphDiagnostics: (canvasRef: {
-    projectRoot: string;
-    canvasId?: string | null;
-  }) => Promise<boolean>;
+  refreshDesktopGraphDiagnostics: (
+    canvasRef: {
+      projectRoot: string;
+      canvasId?: string | null;
+    },
+    isOwnerCurrent: () => boolean
+  ) => Promise<boolean>;
   selectedCanvasId: string | null;
   selectedProject: DesktopProjectSummary | null;
   setError: (message: string | null) => void;
@@ -73,6 +80,8 @@ function errorMessage(caught: unknown): string {
 }
 
 export function useDesktopProjectLoader({
+  beginProjectRequest,
+  beginSnapshotRequest,
   autoSelectInitialProject,
   applyDesktopProjectSnapshot,
   clearProjectState,
@@ -129,71 +138,47 @@ export function useDesktopProjectLoader({
         clearProjectState();
       }
       const canvasRef = desktopCanvasReference(project, canvasId);
-      const isCurrentCanvasRequest = () => {
-        const currentCanvas = currentCanvasRef.current;
-        return (
-          currentCanvas.projectRoot === canvasRef.projectRoot &&
-          currentCanvas.canvasId === canvasRef.canvasId
-        );
-      };
+      const loadRequest = beginProjectRequest(canvasRef, "load");
+      const request = beginSnapshotRequest(canvasRef, { includeLayout: true, includePrompt: true });
       const errors: string[] = [];
+      let publishSnapshotDiagnostics: (() => string[]) | null = null;
       try {
-        const snapshot = await bridge.getDesktopProjectSnapshot(canvasRef);
-        if (!isCurrentCanvasRequest()) {
-          return;
-        }
-        errors.push(
-          ...applyDesktopProjectSnapshot(snapshot, { includeLayout: true, includePrompt: true })
-        );
-        if (snapshot.graph) {
-          try {
-            const diagnosticsApplied = await refreshDesktopGraphDiagnostics(canvasRef);
-            if (!diagnosticsApplied || !isCurrentCanvasRequest()) {
-              return;
+        try {
+          const snapshot = await bridge.getDesktopProjectSnapshot(canvasRef);
+          if (!loadRequest.isCurrent()) return;
+          if (request.isCurrent()) {
+            publishSnapshotDiagnostics = applyDesktopProjectSnapshot(snapshot, request.writeScope);
+            if (snapshot.graph && request.graph.isCurrent()) {
+              await refreshDesktopGraphDiagnostics(canvasRef, request.graph.isCurrent);
             }
+          }
+          if (!loadRequest.isCurrent()) return;
+          if (snapshot.graph) {
             await bridge.refreshPackageFileChanges(canvasRef);
-            if (!isCurrentCanvasRequest()) {
-              return;
-            }
+            if (!loadRequest.isCurrent()) return;
             await bridge.watchPackageFiles(canvasRef);
-            if (!isCurrentCanvasRequest()) {
-              return;
-            }
-          } catch (caught) {
-            if (!isCurrentCanvasRequest()) {
-              return;
-            }
-            errors.push(errorMessage(caught));
           }
-        } else {
-          if (!isCurrentCanvasRequest()) {
-            return;
-          }
-          setGraphDiagnostics([]);
+        } catch (caught) {
+          if (!request.isCurrent()) return;
+          errors.push(errorMessage(caught));
         }
-      } catch (caught) {
-        if (!isCurrentCanvasRequest()) {
-          return;
-        }
-        errors.push(errorMessage(caught));
+        if (!loadRequest.isCurrent()) return;
+        if (publishSnapshotDiagnostics) errors.push(...publishSnapshotDiagnostics());
+        if (request.isCurrent() && errors.length > 0) setError(errors.join("\n"));
+        updateSettings({ runtimePath: project.workspaceRoot });
+      } finally {
+        if (loadRequest.isCurrent()) setProjectLoading(false);
       }
-      if (!isCurrentCanvasRequest()) {
-        return;
-      }
-      if (errors.length > 0) {
-        setError(errors.join("\n"));
-      }
-      updateSettings({ runtimePath: project.workspaceRoot });
-      setProjectLoading(false);
     },
     [
       applyDesktopProjectSnapshot,
+      beginProjectRequest,
+      beginSnapshotRequest,
       clearProjectState,
       currentCanvasRef,
       refreshDesktopGraphDiagnostics,
       setError,
       setExpandedProjectId,
-      setGraphDiagnostics,
       setProjectLoading,
       setSelectedCanvasId,
       setSelectedProject,
@@ -248,55 +233,64 @@ export function useDesktopProjectLoader({
       return;
     }
     const canvasRef = desktopCanvasReference(selectedProject, selectedCanvasId);
-    const nextGraph = await bridge.getGraphViewModel(canvasRef);
-    setGraph(nextGraph);
-    await refreshDesktopGraphDiagnostics(canvasRef);
-  }, [refreshDesktopGraphDiagnostics, selectedCanvasId, selectedProject, setGraph]);
+    const request = beginProjectRequest(canvasRef, "graph");
+    if (!request.isCurrent()) return;
+    try {
+      const nextGraph = await bridge.getGraphViewModel(canvasRef);
+      if (!request.isCurrent()) return;
+      setGraph(nextGraph);
+      setGraphDiagnostics([]);
+      await refreshDesktopGraphDiagnostics(canvasRef, request.isCurrent);
+    } catch (caught) {
+      if (request.isCurrent()) throw caught;
+    }
+  }, [
+    beginProjectRequest,
+    refreshDesktopGraphDiagnostics,
+    selectedCanvasId,
+    selectedProject,
+    setGraph,
+    setGraphDiagnostics
+  ]);
 
   const refreshProjectDerivedState = useCallback(
     async (options: ApplyDesktopProjectSnapshotOptions = {}) => {
-      if (!bridge || !selectedProject) {
-        return;
-      }
+      if (!bridge || !selectedProject) return;
       const canvasRef = desktopCanvasReference(selectedProject, selectedCanvasId);
-      const snapshot = await bridge.getDesktopProjectSnapshot(canvasRef);
-      const currentCanvas = currentCanvasRef.current;
-      if (
-        currentCanvas.projectRoot !== canvasRef.projectRoot ||
-        currentCanvas.canvasId !== canvasRef.canvasId
-      ) {
-        if (options.requireCurrentCanvas) {
-          throw new Error("project_canvas_changed_during_refresh");
+      const request = beginSnapshotRequest(canvasRef, options);
+      const assertCurrent = () => {
+        if (request.isCurrent()) return true;
+        if (options.requireCurrentCanvas) throw new Error("project_canvas_changed_during_refresh");
+        return false;
+      };
+      if (!assertCurrent()) return;
+      try {
+        const snapshot = await bridge.getDesktopProjectSnapshot(canvasRef);
+        if (!assertCurrent()) return;
+        const publishSnapshotDiagnostics = applyDesktopProjectSnapshot(
+          snapshot,
+          request.writeScope
+        );
+        if (snapshot.graph && request.graph.isCurrent()) {
+          await refreshDesktopGraphDiagnostics(canvasRef, request.graph.isCurrent);
+          if (!assertCurrent()) return;
         }
-        return;
-      }
-      const errors = applyDesktopProjectSnapshot(snapshot, options);
-      if (snapshot.graph) {
-        const diagnosticsApplied = await refreshDesktopGraphDiagnostics(canvasRef);
-        if (!diagnosticsApplied) {
-          if (options.requireCurrentCanvas) {
-            throw new Error("project_canvas_changed_during_diagnostics_refresh");
-          }
-          return;
+        const errors = publishSnapshotDiagnostics();
+        if (errors.length > 0) {
+          setError(errors.join("\n"));
+          if (options.throwOnErrors) throw new Error(errors.join("\n"));
         }
-      } else {
-        setGraphDiagnostics([]);
-      }
-      if (errors.length > 0) {
-        setError(errors.join("\n"));
-        if (options.throwOnErrors) {
-          throw new Error(errors.join("\n"));
-        }
+      } catch (caught) {
+        if (request.isCurrent() || options.requireCurrentCanvas) throw caught;
       }
     },
     [
       applyDesktopProjectSnapshot,
-      currentCanvasRef,
+      beginSnapshotRequest,
       refreshDesktopGraphDiagnostics,
       selectedCanvasId,
       selectedProject,
-      setError,
-      setGraphDiagnostics
+      setError
     ]
   );
 

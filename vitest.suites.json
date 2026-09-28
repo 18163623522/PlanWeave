@@ -142,6 +142,7 @@
         "desktopDiagnosticsPopover.test.tsx",
         "desktopProjectHook.test.tsx",
         "desktopProjectLoaderHook.test.tsx",
+        "desktopSnapshotDiagnosticsHook.test.tsx",
         "desktopProjectSessionHook.test.tsx",
         "desktopRuntimeRefreshHook.test.tsx",
         "desktopRuntimeSubscriptionsHook.test.tsx",

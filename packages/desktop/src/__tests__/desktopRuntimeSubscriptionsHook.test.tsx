@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { DesktopGraphViewModel, ValidationIssue } from "@planweave-ai/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopBridgeMock } from "./desktopBridgeMock";
-import { project, projectSnapshot } from "./helpers/desktopProjectFixtures";
+import { deferred, project, projectSnapshot } from "./helpers/desktopProjectFixtures";
 import { graph } from "./helpers/graphFixtures";
 import { cleanupRendererTestEnvironment } from "./helpers/rendererTestEnvironment";
 import { createTranslator } from "../renderer/i18n";
@@ -36,6 +36,57 @@ async function settleMockCalls(mock: ReturnType<typeof vi.fn>): Promise<void> {
 }
 
 describe("desktop runtime subscriptions hook", () => {
+  it.each([
+    "resolve",
+    "reject"
+  ])("ignores a runtime-triggered graph %s after canvas selection changes", async (outcome) => {
+    const pending = deferred<DesktopGraphViewModel>();
+    const callbacks: Array<
+      Parameters<ReturnType<typeof createDesktopBridgeMock>["onRuntimeStateChanged"]>[0]
+    > = [];
+    const bridge = createDesktopBridgeMock({
+      listProjects: vi.fn().mockResolvedValue([]),
+      getDesktopProjectSnapshot: vi.fn().mockResolvedValue(projectSnapshot()),
+      getGraphViewModel: vi.fn().mockReturnValue(pending.promise),
+      onRuntimeStateChanged: vi.fn((callback) => {
+        callbacks.push(callback);
+        return () => undefined;
+      })
+    });
+    vi.stubGlobal("planweave", bridge);
+    vi.resetModules();
+    const { useDesktopProject } = await import("../renderer/hooks/useDesktopProject");
+    const setError = vi.fn();
+    const t = createTranslator("en");
+    const updateSettings = vi.fn();
+    const { result } = renderHook(() => useDesktopProject({ setError, t, updateSettings }));
+    await waitFor(() => expect(result.current.projectLoading).toBe(false));
+    await act(async () => {
+      await result.current.loadProject(project);
+    });
+    act(() => {
+      callbacks.at(-1)?.({
+        projectRoot: project.rootPath,
+        canvasId: "canvas-main",
+        stateFile: "state.json",
+        changedAt: "2026-09-28T00:00:00Z"
+      });
+    });
+    await act(async () => {
+      await result.current.loadProject(project, "other");
+    });
+    setError.mockClear();
+    await act(async () => {
+      if (outcome === "resolve") pending.resolve({ ...graph, graphVersion: "obsolete" });
+      else pending.reject(new Error("obsolete"));
+      await flushAsyncEffects();
+    });
+    expect(result.current.selectedCanvasId).toBe("other");
+    expect(result.current.graph).toBe(graph);
+    expect(setError).not.toHaveBeenCalled();
+    expect(bridge.getGraphViewModel).toHaveBeenCalledOnce();
+  });
+
   it("polls lightweight runtime state for external runtime updates", async () => {
     vi.useFakeTimers();
     try {

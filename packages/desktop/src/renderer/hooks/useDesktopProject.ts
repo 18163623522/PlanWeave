@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type SetStateAction } from "react";
 import type {
   DesktopGraphViewModel,
   DesktopLayout,
@@ -41,8 +41,8 @@ export function useDesktopProject({
   const [projects, setProjects] = useState<DesktopProjectSummary[]>([]);
   const [projectLoading, setProjectLoading] = useState(Boolean(bridge));
   const [projectRefreshing, setProjectRefreshing] = useState(false);
-  const [selectedProject, setSelectedProject] = useState<DesktopProjectSummary | null>(null);
-  const [selectedCanvasId, setSelectedCanvasId] = useState<string | null>(null);
+  const [selectedProject, setSelectedProjectState] = useState<DesktopProjectSummary | null>(null);
+  const [selectedCanvasId, setSelectedCanvasIdState] = useState<string | null>(null);
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [graph, setGraph] = useState<DesktopGraphViewModel | null>(null);
   const [layout, setLayout] = useState<DesktopLayout | null>(null);
@@ -61,7 +61,11 @@ export function useDesktopProject({
   >([]);
 
   const {
+    beginProjectRequest,
+    beginSnapshotRequest,
+    selectCanvas,
     applyDesktopProjectSnapshot,
+    applyDesktopGraph,
     applyRuntimeRefreshSnapshot,
     clearProjectState,
     currentCanvasRef,
@@ -84,6 +88,25 @@ export function useDesktopProject({
     setTodoGroups
   });
 
+  const setSelectedProject = useCallback(
+    (value: DesktopProjectSummary | null) => {
+      if (currentCanvasRef.current.projectRoot !== (value?.rootPath ?? null)) clearProjectState();
+      selectCanvas(value?.rootPath ?? null, currentCanvasRef.current.canvasId);
+      setSelectedProjectState(value);
+    },
+    [clearProjectState, currentCanvasRef, selectCanvas]
+  );
+  const setSelectedCanvasId = useCallback(
+    (value: SetStateAction<string | null>) => {
+      const canvasId =
+        typeof value === "function" ? value(currentCanvasRef.current.canvasId) : value;
+      if (currentCanvasRef.current.canvasId !== canvasId) clearProjectState();
+      selectCanvas(currentCanvasRef.current.projectRoot, canvasId);
+      setSelectedCanvasIdState(canvasId);
+    },
+    [clearProjectState, currentCanvasRef, selectCanvas]
+  );
+
   const {
     handleOpenProject,
     loadProject,
@@ -96,6 +119,8 @@ export function useDesktopProject({
     updateProjectPrompt,
     updateProjectPromptPolicy
   } = useDesktopProjectLoader({
+    beginProjectRequest,
+    beginSnapshotRequest,
     autoSelectInitialProject,
     applyDesktopProjectSnapshot,
     clearProjectState,
@@ -106,7 +131,7 @@ export function useDesktopProject({
     selectedProject,
     setError,
     setExpandedProjectId,
-    setGraph,
+    setGraph: applyDesktopGraph,
     setGraphDiagnostics,
     setProjectLoading,
     setProjectPromptMarkdown,
@@ -125,25 +150,24 @@ export function useDesktopProject({
       return;
     }
     const canvasRef = desktopCanvasReference(selectedProject, selectedCanvasId);
-    const snapshot = await bridge.getDesktopRuntimeRefresh(canvasRef);
-    const currentCanvas = currentCanvasRef.current;
-    if (
-      currentCanvas.projectRoot !== canvasRef.projectRoot ||
-      currentCanvas.canvasId !== canvasRef.canvasId
-    ) {
-      return;
-    }
-    const errors = applyRuntimeRefreshSnapshot(snapshot);
-    const diagnosticsApplied = await refreshDesktopGraphDiagnostics(canvasRef);
-    if (!diagnosticsApplied) {
-      return;
-    }
-    if (errors.length > 0) {
-      setError(errors.join("\n"));
+    const request = beginProjectRequest(canvasRef, "runtime");
+    if (!request.isCurrent()) return;
+    try {
+      const snapshot = await bridge.getDesktopRuntimeRefresh(canvasRef);
+      if (!request.isCurrent()) return;
+      const errors = applyRuntimeRefreshSnapshot(snapshot);
+      await refreshDesktopGraphDiagnostics(
+        canvasRef,
+        () => request.isCurrent() && request.isGraphCurrent()
+      );
+      if (!request.isCurrent()) return;
+      if (errors.length > 0) setError(errors.join("\n"));
+    } catch (caught) {
+      if (request.isCurrent()) throw caught;
     }
   }, [
     applyRuntimeRefreshSnapshot,
-    currentCanvasRef,
+    beginProjectRequest,
     refreshDesktopGraphDiagnostics,
     selectedCanvasId,
     selectedProject,

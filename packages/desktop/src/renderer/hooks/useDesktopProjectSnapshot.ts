@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import type {
   DesktopGraphViewModel,
   DesktopLayout,
@@ -26,6 +26,28 @@ export type CurrentDesktopCanvasRef = {
   hasGraph: boolean;
   projectRoot: string | null;
 };
+
+type SnapshotWriteScope = { graph: boolean; derived: boolean; layout: boolean; prompt: boolean };
+
+function snapshotDiagnosticDomain(diagnostic: ValidationIssue): keyof SnapshotWriteScope {
+  if (diagnostic.code !== "desktop_snapshot_part_failed") return "derived";
+  switch (diagnostic.path) {
+    case "graph":
+      return "graph";
+    case "layout":
+      return "layout";
+    case "projectPromptMarkdown":
+    case "projectPromptPolicy":
+      return "prompt";
+    case "todoGroups":
+    case "executionPlan":
+    case "statistics":
+    case "pendingImportRecoveries":
+      return "derived";
+    default:
+      throw new Error(`Unknown desktop snapshot diagnostic part: ${diagnostic.path}`);
+  }
+}
 
 type UseDesktopProjectSnapshotArgs = {
   graph: DesktopGraphViewModel | null;
@@ -68,15 +90,105 @@ export function useDesktopProjectSnapshot({
     projectRoot: null
   });
 
-  useEffect(() => {
-    currentCanvasRef.current = {
-      canvasId: selectedCanvasId,
-      hasGraph: Boolean(graph),
-      projectRoot: selectedProjectRoot
+  const snapshotDiagnostics = useRef<ValidationIssue[]>([]);
+
+  const lifecycle = useRef({
+    mounted: true,
+    generation: 0,
+    load: 0,
+    graph: 0,
+    derived: 0,
+    layout: 0,
+    prompt: 0,
+    runtime: 0,
+    diagnostics: 0
+  });
+  const invalidateProjectRequests = useCallback(() => {
+    lifecycle.current.generation += 1;
+  }, []);
+  const selectCanvas = useCallback(
+    (projectRoot: string | null, canvasId: string | null) => {
+      const current = currentCanvasRef.current;
+      if (current.projectRoot !== projectRoot || current.canvasId !== canvasId) {
+        invalidateProjectRequests();
+        currentCanvasRef.current = { projectRoot, canvasId, hasGraph: false };
+      }
+    },
+    [invalidateProjectRequests]
+  );
+  useLayoutEffect(() => {
+    lifecycle.current.mounted = true;
+    return () => {
+      lifecycle.current.mounted = false;
+      invalidateProjectRequests();
     };
-  }, [graph, selectedCanvasId, selectedProjectRoot]);
+  }, [invalidateProjectRequests]);
+  useLayoutEffect(() => {
+    selectCanvas(selectedProjectRoot, selectedCanvasId);
+    currentCanvasRef.current.hasGraph = Boolean(graph);
+  }, [graph, selectedCanvasId, selectedProjectRoot, selectCanvas]);
+
+  const beginProjectRequest = useCallback(
+    (
+      canvas: { projectRoot: string; canvasId?: string | null },
+      category: "load" | "graph" | "derived" | "layout" | "prompt" | "runtime" | "diagnostics"
+    ) => {
+      const generation = lifecycle.current.generation;
+      const targetsCurrentCanvas =
+        lifecycle.current.mounted &&
+        currentCanvasRef.current.projectRoot === canvas.projectRoot &&
+        currentCanvasRef.current.canvasId === canvas.canvasId;
+      const sequence = targetsCurrentCanvas
+        ? ++lifecycle.current[category]
+        : lifecycle.current[category];
+      if (targetsCurrentCanvas && category === "graph") lifecycle.current.diagnostics += 1;
+      const graphSequence = lifecycle.current.graph;
+      const isSelectionCurrent = () =>
+        targetsCurrentCanvas &&
+        lifecycle.current.mounted &&
+        lifecycle.current.generation === generation &&
+        currentCanvasRef.current.projectRoot === canvas.projectRoot &&
+        currentCanvasRef.current.canvasId === canvas.canvasId;
+      return {
+        isSelectionCurrent,
+        isGraphCurrent: () => isSelectionCurrent() && lifecycle.current.graph === graphSequence,
+        isCurrent: () => isSelectionCurrent() && lifecycle.current[category] === sequence
+      };
+    },
+    []
+  );
+
+  const beginSnapshotRequest = useCallback(
+    (
+      canvas: { projectRoot: string; canvasId?: string | null },
+      options: ApplyDesktopProjectSnapshotOptions
+    ) => {
+      const graph = beginProjectRequest(canvas, "graph");
+      const derived = beginProjectRequest(canvas, "derived");
+      const layout = options.includeLayout ? beginProjectRequest(canvas, "layout") : null;
+      const prompt = options.includePrompt ? beginProjectRequest(canvas, "prompt") : null;
+      return {
+        graph,
+        isCurrent: () =>
+          graph.isCurrent() ||
+          derived.isCurrent() ||
+          Boolean(layout?.isCurrent()) ||
+          Boolean(prompt?.isCurrent()),
+        writeScope: () => ({
+          graph: graph.isCurrent(),
+          derived: derived.isCurrent(),
+          layout: Boolean(layout?.isCurrent()),
+          prompt: Boolean(prompt?.isCurrent())
+        })
+      };
+    },
+    [beginProjectRequest]
+  );
 
   const clearProjectState = useCallback(() => {
+    invalidateProjectRequests();
+    snapshotDiagnostics.current = [];
+    currentCanvasRef.current.hasGraph = false;
     setGraph(null);
     setLayout(null);
     setTodoGroups(null);
@@ -90,6 +202,7 @@ export function useDesktopProjectSnapshot({
     setProjectPromptPolicy(null);
     setPendingImportRecoveries([]);
   }, [
+    invalidateProjectRequests,
     setExecutionPlan,
     setGraph,
     setGraphDiagnostics,
@@ -104,29 +217,74 @@ export function useDesktopProjectSnapshot({
     setTodoGroups
   ]);
 
+  const applyDesktopGraph = useCallback(
+    (value: DesktopGraphViewModel | null) => {
+      setGraph(value);
+      setGraphDiagnostics([]);
+      if (
+        snapshotDiagnostics.current.some((issue) => snapshotDiagnosticDomain(issue) === "graph")
+      ) {
+        snapshotDiagnostics.current = snapshotDiagnostics.current.filter(
+          (issue) => snapshotDiagnosticDomain(issue) !== "graph"
+        );
+        setProjectDiagnostics(snapshotDiagnostics.current);
+      }
+    },
+    [setGraph, setGraphDiagnostics, setProjectDiagnostics]
+  );
+
   const applyDesktopProjectSnapshot = useCallback(
-    (snapshot: DesktopProjectSnapshot, options: ApplyDesktopProjectSnapshotOptions = {}) => {
-      if (options.includePrompt) {
+    (snapshot: DesktopProjectSnapshot, getScope: () => SnapshotWriteScope) => {
+      const scope = getScope();
+      if (scope.prompt) {
         setProjectPromptMarkdown(snapshot.projectPromptMarkdown);
         setProjectPromptPolicy(snapshot.projectPromptPolicy);
       }
-      setGraph(snapshot.graph);
-      if (options.includeLayout) {
+      if (scope.graph) {
+        applyDesktopGraph(snapshot.graph);
+      }
+      if (scope.layout) {
         setLayout(snapshot.layout);
       }
-      setTodoGroups(snapshot.todoGroups);
-      setExecutionPlan(snapshot.executionPlan);
-      setStatistics(snapshot.statistics);
-      setPendingImportRecoveries(snapshot.pendingImportRecoveries);
-      setProjectDiagnostics(snapshot.diagnostics);
-      return snapshot.errors.filter((_, index) => {
-        const diagnostic = snapshot.diagnostics[index];
-        return !diagnostic || !isDesktopPerformanceDiagnostic(diagnostic);
-      });
+      if (scope.derived) {
+        setTodoGroups(snapshot.todoGroups);
+        setExecutionPlan(snapshot.executionPlan);
+        setStatistics(snapshot.statistics);
+        setPendingImportRecoveries(snapshot.pendingImportRecoveries);
+      }
+      return () => {
+        const currentScope = getScope();
+        if (!Object.values(currentScope).some(Boolean)) return [];
+        if (snapshot.errors.length !== snapshot.diagnostics.length) {
+          throw new Error("Desktop snapshot errors and diagnostics must have matching entries.");
+        }
+        const diagnostics = snapshot.diagnostics.filter(
+          (issue) => currentScope[snapshotDiagnosticDomain(issue)]
+        );
+        const nextDiagnostics = [
+          ...snapshotDiagnostics.current.filter(
+            (issue) => !currentScope[snapshotDiagnosticDomain(issue)]
+          ),
+          ...diagnostics
+        ];
+        if (
+          nextDiagnostics.length !== snapshotDiagnostics.current.length ||
+          nextDiagnostics.some((issue, index) => issue !== snapshotDiagnostics.current[index])
+        ) {
+          snapshotDiagnostics.current = nextDiagnostics;
+          setProjectDiagnostics(nextDiagnostics);
+        }
+        return snapshot.errors.filter((_, index) => {
+          const issue = snapshot.diagnostics[index]!;
+          return (
+            currentScope[snapshotDiagnosticDomain(issue)] && !isDesktopPerformanceDiagnostic(issue)
+          );
+        });
+      };
     },
     [
       setExecutionPlan,
-      setGraph,
+      applyDesktopGraph,
       setLayout,
       setPendingImportRecoveries,
       setProjectDiagnostics,
@@ -150,26 +308,31 @@ export function useDesktopProjectSnapshot({
   );
 
   const refreshDesktopGraphDiagnostics = useCallback(
-    async (canvasRef: { projectRoot: string; canvasId?: string | null }) => {
-      if (!bridge) {
-        return false;
+    async (
+      canvasRef: { projectRoot: string; canvasId?: string | null },
+      isOwnerCurrent: () => boolean
+    ) => {
+      if (!bridge || !isOwnerCurrent()) return false;
+      const request = beginProjectRequest(canvasRef, "diagnostics");
+      try {
+        const diagnostics = await bridge.getDesktopGraphDiagnostics(canvasRef);
+        if (!request.isCurrent() || !isOwnerCurrent()) return false;
+        setGraphDiagnostics(diagnostics.diagnostics);
+        return true;
+      } catch (caught) {
+        if (!request.isCurrent() || !isOwnerCurrent()) return false;
+        throw caught;
       }
-      const diagnostics = await bridge.getDesktopGraphDiagnostics(canvasRef);
-      const currentCanvas = currentCanvasRef.current;
-      if (
-        currentCanvas.projectRoot !== canvasRef.projectRoot ||
-        currentCanvas.canvasId !== canvasRef.canvasId
-      ) {
-        return false;
-      }
-      setGraphDiagnostics(diagnostics.diagnostics);
-      return true;
     },
-    [setGraphDiagnostics]
+    [beginProjectRequest, setGraphDiagnostics]
   );
 
   return {
+    beginProjectRequest,
+    beginSnapshotRequest,
+    selectCanvas,
     applyDesktopProjectSnapshot,
+    applyDesktopGraph,
     applyRuntimeRefreshSnapshot,
     clearProjectState,
     currentCanvasRef,

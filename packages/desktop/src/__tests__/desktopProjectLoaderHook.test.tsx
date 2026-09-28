@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type {
   DesktopGraphViewModel,
@@ -20,6 +21,230 @@ import { createTranslator } from "../renderer/i18n";
 afterEach(cleanupRendererTestEnvironment);
 
 describe("desktop project loader hook", () => {
+  it("keeps diagnostics and errors in the current request generation under StrictMode", async () => {
+    const bridge = createDesktopBridgeMock({
+      listProjects: vi.fn().mockResolvedValue([]),
+      getDesktopProjectSnapshot: vi.fn().mockResolvedValue(projectSnapshot()),
+      getGraphViewModel: vi.fn().mockResolvedValue(graph)
+    });
+    vi.stubGlobal("planweave", bridge);
+    vi.resetModules();
+    const { useDesktopProject } = await import("../renderer/hooks/useDesktopProject");
+    const setError = vi.fn();
+    const t = createTranslator("en");
+    const updateSettings = vi.fn();
+    const { result, unmount } = renderHook(
+      () => useDesktopProject({ setError, t, updateSettings }),
+      { wrapper: StrictMode }
+    );
+    await waitFor(() => expect(result.current.projectLoading).toBe(false));
+    await act(async () => {
+      await result.current.loadProject(project);
+    });
+    const staleDiagnostics =
+      deferred<Awaited<ReturnType<typeof bridge.getDesktopGraphDiagnostics>>>();
+    vi.mocked(bridge.getDesktopGraphDiagnostics).mockReturnValueOnce(staleDiagnostics.promise);
+    let first!: Promise<void>;
+    await act(async () => {
+      first = result.current.refreshGraph();
+    });
+    const activeDiagnostic = { code: "active", message: "Current diagnostic" };
+    vi.mocked(bridge.getDesktopGraphDiagnostics).mockResolvedValue({
+      diagnostics: [activeDiagnostic],
+      graphQuality: { ok: true, diagnostics: [] },
+      executionReadiness: { ok: true, diagnostics: [] }
+    });
+    await act(async () => {
+      await result.current.refreshGraph();
+    });
+    await act(async () => {
+      staleDiagnostics.resolve({
+        diagnostics: [{ code: "old", message: "Obsolete" }],
+        graphQuality: { ok: true, diagnostics: [] },
+        executionReadiness: { ok: true, diagnostics: [] }
+      });
+      await first;
+    });
+    expect(result.current.graphDiagnostics).toEqual([activeDiagnostic]);
+    const failed = deferred<DesktopGraphViewModel>();
+    vi.mocked(bridge.getGraphViewModel).mockReturnValueOnce(failed.promise);
+    act(() => {
+      first = result.current.refreshGraph();
+    });
+    await act(async () => {
+      await result.current.loadProject(project, "other");
+    });
+    setError.mockClear();
+    await act(async () => {
+      failed.reject(new Error("obsolete failure"));
+      await first;
+    });
+    expect(setError).not.toHaveBeenCalled();
+    vi.mocked(bridge.getGraphViewModel).mockRejectedValueOnce(new Error("current failure"));
+    await expect(result.current.refreshGraph()).rejects.toThrow("current failure");
+    await act(async () => {
+      await result.current.refreshGraph();
+    });
+    expect(result.current.graph).toBe(graph);
+    const unmounted = deferred<DesktopGraphViewModel>();
+    vi.mocked(bridge.getGraphViewModel).mockReturnValueOnce(unmounted.promise);
+    act(() => {
+      first = result.current.refreshGraph();
+    });
+    unmount();
+    unmounted.reject(new Error("unmounted failure"));
+    await expect(first).resolves.toBeUndefined();
+  });
+
+  it.each([
+    "graph",
+    "derived",
+    "layout"
+  ])("keeps each load data category owned by the latest %s writer", async (writer) => {
+    const snapshot = deferred<ReturnType<typeof projectSnapshot>>();
+    const loadedSnapshot = projectSnapshot({
+      projectPromptMarkdown: "Loaded prompt",
+      projectPromptPolicy: { includeGlobalPrompt: true },
+      todoGroups: {
+        planned: [],
+        ready: [],
+        in_progress: [],
+        completed: [],
+        needs_changes: [],
+        blocked: [],
+        diverged: [],
+        implemented: []
+      },
+      executionPlan: { notes: ["Loaded plan"], phases: [], readyQueue: [] },
+      statistics: {
+        averageImplementationTimeMs: null,
+        totalImplementationTimeMs: null,
+        timedImplementationRunCount: 0,
+        blockTotal: 1,
+        completedBlockCount: 0,
+        estimatedRemainingBlocks: 1,
+        feedbackEnvelopeCount: 0,
+        implementedRatio: 0,
+        implementedTaskCount: 0,
+        reviewPassedCount: 0,
+        reviewPassedRatio: 0,
+        reworkCount: 0,
+        taskThroughput: 0,
+        taskTotal: 1
+      }
+    });
+    const activeGraph = { ...graph, graphVersion: "active-refresh" };
+    const refreshedSnapshot = projectSnapshot({
+      ...loadedSnapshot,
+      graph: activeGraph,
+      layout: { ...layout, nodes: [{ nodeId: "T-ALPHA", x: 20, y: 40 }] },
+      todoGroups: { ...loadedSnapshot.todoGroups!, planned: [] },
+      executionPlan: { notes: ["Newer plan"], phases: [], readyQueue: [] },
+      statistics: { ...loadedSnapshot.statistics!, taskTotal: 2 },
+      projectPromptMarkdown: "Not requested by refresh"
+    });
+    const activeDiagnostics = [{ code: "current", message: "Current graph diagnostic" }];
+    const bridge = createDesktopBridgeMock({
+      listProjects: vi.fn().mockResolvedValue([]),
+      getDesktopProjectSnapshot: vi
+        .fn()
+        .mockReturnValueOnce(snapshot.promise)
+        .mockResolvedValue(refreshedSnapshot),
+      getDesktopGraphDiagnostics: vi.fn().mockResolvedValue({
+        diagnostics: activeDiagnostics,
+        graphQuality: { ok: true, diagnostics: [] },
+        executionReadiness: { ok: true, diagnostics: [] }
+      }),
+      getGraphViewModel: vi.fn().mockResolvedValue(activeGraph)
+    });
+    vi.stubGlobal("planweave", bridge);
+    vi.resetModules();
+    const { useDesktopProject } = await import("../renderer/hooks/useDesktopProject");
+    const setError = vi.fn();
+    const t = createTranslator("en");
+    const updateSettings = vi.fn();
+    const { result } = renderHook(() => useDesktopProject({ setError, t, updateSettings }));
+    await waitFor(() => expect(result.current.projectLoading).toBe(false));
+    let loading!: Promise<void>;
+    act(() => {
+      loading = result.current.loadProject(project);
+    });
+    await act(async () => {
+      if (writer === "graph") await result.current.refreshGraph();
+      else await result.current.refreshProjectDerivedState({ includeLayout: writer === "layout" });
+    });
+    await act(async () => {
+      snapshot.resolve(loadedSnapshot);
+      await loading;
+    });
+    expect(result.current.graph).toBe(activeGraph);
+    expect(result.current.projectLoading).toBe(false);
+    expect(result.current.layout).toBe(writer === "layout" ? refreshedSnapshot.layout : layout);
+    expect(result.current.graphDiagnostics).toEqual(activeDiagnostics);
+    expect(result.current.projectPromptMarkdown).toBe("Loaded prompt");
+    expect(result.current.projectPromptPolicy).toEqual({ includeGlobalPrompt: true });
+    const expectedDerived = writer === "graph" ? loadedSnapshot : refreshedSnapshot;
+    expect(result.current.todoGroups).toBe(expectedDerived.todoGroups);
+    expect(result.current.executionPlan).toBe(expectedDerived.executionPlan);
+    expect(result.current.statistics).toBe(expectedDerived.statistics);
+  });
+
+  it.each([
+    "switch",
+    "return",
+    "refresh",
+    "snapshot",
+    "clear",
+    "unmount"
+  ])("ignores a delayed graph response after %s", async (transition) => {
+    const pending = deferred<DesktopGraphViewModel>();
+    const activeGraph = { ...graph, graphVersion: "active" };
+    const bridge = createDesktopBridgeMock({
+      listProjects: vi.fn().mockResolvedValue([]),
+      getDesktopProjectSnapshot: vi.fn().mockResolvedValue(projectSnapshot()),
+      getGraphViewModel: vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(activeGraph)
+    });
+    vi.stubGlobal("planweave", bridge);
+    vi.resetModules();
+    const { useDesktopProject } = await import("../renderer/hooks/useDesktopProject");
+    const setError = vi.fn();
+    const updateSettings = vi.fn();
+    const t = createTranslator("en");
+    const { result, unmount } = renderHook(() =>
+      useDesktopProject({ setError, updateSettings, t })
+    );
+    await waitFor(() => expect(result.current.projectLoading).toBe(false));
+    await act(async () => {
+      await result.current.loadProject(project);
+    });
+    let request!: Promise<void>;
+    act(() => {
+      request = result.current.refreshGraph();
+    });
+    await act(async () => {
+      if (transition === "switch" || transition === "return") {
+        await result.current.loadProject(project, "other");
+        if (transition === "return") await result.current.loadProject(project, "canvas-main");
+      } else if (transition === "refresh") {
+        await result.current.refreshGraph();
+      } else if (transition === "snapshot") {
+        await result.current.refreshProjectDerivedState();
+      } else if (transition === "clear") {
+        await result.current.refreshProjects();
+      } else {
+        unmount();
+      }
+    });
+    const expected = result.current.graph;
+    const diagnosticsCalls = vi.mocked(bridge.getDesktopGraphDiagnostics).mock.calls.length;
+    await act(async () => {
+      pending.resolve({ ...graph, graphVersion: "obsolete" });
+      await request;
+    });
+    expect(result.current.graph).toBe(expected);
+    expect(bridge.getDesktopGraphDiagnostics).toHaveBeenCalledTimes(diagnosticsCalls);
+  });
+
   it("waits for settings hydration and restores the persisted project path", async () => {
     const restoredProject: DesktopProjectSummary = {
       ...project,
@@ -674,6 +899,13 @@ describe("desktop project loader hook", () => {
           projectPromptPolicy: { includeGlobalPrompt: true },
           graph: null,
           layout: null,
+          diagnostics: [
+            {
+              code: "desktop_snapshot_part_failed",
+              path: "graph",
+              message: "Invalid manifest schema"
+            }
+          ],
           errors: ["graph: Invalid manifest schema"]
         })
       )
@@ -745,6 +977,13 @@ describe("desktop project loader hook", () => {
       getDesktopProjectSnapshot: vi.fn().mockResolvedValue(
         projectSnapshot({
           layout: null,
+          diagnostics: [
+            {
+              code: "desktop_snapshot_part_failed",
+              path: "layout",
+              message: "layout.nodes.filter is not a function"
+            }
+          ],
           errors: ["layout: layout.nodes.filter is not a function"]
         })
       ),
@@ -799,7 +1038,16 @@ describe("desktop project loader hook", () => {
 
     await waitFor(() => expect(result.current.projectLoading).toBe(false));
     getDesktopProjectSnapshot.mockResolvedValue(
-      projectSnapshot({ errors: ["graph: authoritative package could not be loaded"] })
+      projectSnapshot({
+        diagnostics: [
+          {
+            code: "desktop_snapshot_part_failed",
+            path: "graph",
+            message: "authoritative package could not be loaded"
+          }
+        ],
+        errors: ["graph: authoritative package could not be loaded"]
+      })
     );
 
     await expect(
