@@ -12,6 +12,7 @@ import {
   readImplementationRunMetadataFile
 } from "../taskManager/implementationRunMetadata.js";
 import { readState } from "../state.js";
+import { missingImplementationClaimIdentityReason } from "../taskManager/implementationClaimIdentity.js";
 import {
   DEFAULT_PROCESS_TREE_GRACE_MS,
   spawnManagedProcess,
@@ -358,10 +359,15 @@ export async function prepareBlockRun(options: {
   startedAt: string;
   executionAdmittedAt?: string;
 }> {
-  const { workspace } = await loadPackage(options.projectRoot);
-  const { taskId, blockId } = parseBlockRef(options.claim.ref);
   const submissionAttemptId =
     options.claim.blockType === "implementation" ? options.claim.submissionAttemptId : undefined;
+  if (options.claim.blockType === "implementation" && !submissionAttemptId) {
+    throw new ExecutorClaimRejectedError(
+      missingImplementationClaimIdentityReason(options.claim.ref)
+    );
+  }
+  const { workspace } = await loadPackage(options.projectRoot);
+  const { taskId, blockId } = parseBlockRef(options.claim.ref);
   return withCanvasLock(dirname(workspace.stateFile), async () => {
     if (submissionAttemptId !== undefined) {
       const state = await readState(workspace.stateFile);

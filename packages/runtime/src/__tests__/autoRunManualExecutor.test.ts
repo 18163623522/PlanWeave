@@ -11,8 +11,10 @@ import {
   submitBlockResult,
   submitReviewResult
 } from "../index.js";
+import * as taskManager from "../taskManager/index.js";
+import { prepareAcpBlockRun } from "../autoRun/acpRunPreparation.js";
 import * as json from "../json.js";
-import { readState } from "../state.js";
+import { readState, writeState } from "../state.js";
 import { ExecutorCancelledError, prepareBlockRun } from "../autoRun/executorShared.js";
 import { readJsonFile, writeJsonFile } from "../json.js";
 import {
@@ -28,6 +30,154 @@ import {
 } from "./autoRunTestBuilders.js";
 
 describe("Auto Run manual executor", () => {
+  it.each([
+    false,
+    true
+  ])("starts a new manual cycle after explicit legacy recovery (dispatch=%s)", async (dispatch) => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("expected block claim");
+    const state = await readState(init.workspace.stateFile);
+    delete state.blocks[claim.ref].submissionAttemptId;
+    await writeState(init.workspace.stateFile, state);
+    const before = await readFile(init.workspace.stateFile, "utf8");
+    await runAutoRunStep({ projectRoot: root, executorName: "manual" });
+    expect(await readFile(init.workspace.stateFile, "utf8")).toBe(before);
+    await taskManager.markBlockBlocked({
+      projectRoot: root,
+      ref: claim.ref,
+      reason: "old executor drained"
+    });
+    await taskManager.unblockBlock({
+      projectRoot: root,
+      ref: claim.ref,
+      reason: "start a new execution cycle"
+    });
+    const recovered = dispatch
+      ? await taskManager.claimDispatchedBlock({ projectRoot: root, ref: claim.ref })
+      : await claimNext({ projectRoot: root });
+    if (recovered.kind !== "block") throw new Error("expected recovered claim");
+    expect(recovered.submissionAttemptId).toEqual(expect.any(String));
+    expect(recovered.submissionAttemptId).not.toBe(claim.submissionAttemptId);
+    expect(await runAutoRunStep({ projectRoot: root, executorName: "manual" })).toMatchObject({
+      kind: "manual"
+    });
+    expect(
+      await submitBlockResult({
+        projectRoot: root,
+        ref: recovered.ref,
+        reportPath: await writeReport(root, "recovered.md")
+      })
+    ).toMatchObject({ status: "completed", runId: "RUN-001" });
+  });
+
+  it("rejects repeated legacy ACP preparation before allocating any RUN", async () => {
+    const { root, init } = await createTestWorkspace();
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("expected block claim");
+    delete claim.submissionAttemptId;
+    const state = await readState(init.workspace.stateFile);
+    delete state.blocks[claim.ref].submissionAttemptId;
+    await writeState(init.workspace.stateFile, state);
+    const before = await readFile(init.workspace.stateFile, "utf8");
+    const files = await readdir(init.workspace.resultsDir, { recursive: true });
+    const outcomes = await Promise.allSettled(
+      [0, 1].map(() =>
+        prepareAcpBlockRun({
+          projectRoot: root,
+          claim,
+          executorName: "codex-acp",
+          profile: { adapter: "agent", agent: "codex", runner: { transport: "acp" } },
+          prompt: "legacy implementation"
+        })
+      )
+    );
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+    for (const outcome of outcomes) {
+      if (outcome.status !== "rejected") throw new Error("expected rejected preparation");
+      expect(outcome.reason).toMatchObject({
+        message: expect.stringContaining("submissionAttemptId")
+      });
+    }
+    expect(await readdir(init.workspace.resultsDir, { recursive: true })).toEqual(files);
+    expect(await readFile(init.workspace.stateFile, "utf8")).toBe(before);
+  });
+
+  it.each([
+    { batch: false, outcome: "result" },
+    { batch: true, outcome: "result" },
+    { batch: false, outcome: "failure" },
+    { batch: true, outcome: "failure" },
+    { batch: false, outcome: "cancelled" },
+    { batch: true, outcome: "cancelled" }
+  ])("rejects a captured legacy claim after reclaim before its $outcome can write back (batch=$batch)", async ({
+    batch,
+    outcome
+  }) => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    const legacy = await claimNext({ projectRoot: root });
+    if (legacy.kind !== "block") throw new Error("expected implementation claim");
+    delete legacy.submissionAttemptId;
+    const state = await readState(init.workspace.stateFile);
+    delete state.blocks[legacy.ref].submissionAttemptId;
+    await writeState(init.workspace.stateFile, state);
+    const originalClaimNext = taskManager.claimNext;
+    let reclaimed: Awaited<ReturnType<typeof readState>> | undefined;
+    let executorCalls = 0;
+    const claimSpy = vi.spyOn(taskManager, "claimNext").mockImplementationOnce(async () => {
+      await taskManager.releaseInProgressBlock({ projectRoot: root, ref: legacy.ref });
+      await originalClaimNext({
+        projectRoot: root,
+        scope: { kind: "block", blockRef: legacy.ref }
+      });
+      reclaimed = await readState(init.workspace.stateFile);
+      expect(reclaimed.blocks[legacy.ref].submissionAttemptId).toEqual(expect.any(String));
+      return batch
+        ? {
+            kind: "batch",
+            refs: [legacy.ref],
+            effectiveExecutors: { [legacy.ref]: legacy.effectiveExecutor }
+          }
+        : legacy;
+    });
+    let error: unknown;
+    try {
+      await runAutoRunStep({
+        projectRoot: root,
+        parallel: batch,
+        executor: {
+          async runBlock() {
+            executorCalls++;
+            if (outcome === "failure") throw new Error("legacy executor failed");
+            if (outcome === "cancelled")
+              throw new ExecutorCancelledError("legacy executor cancelled");
+            return { kind: "block", reportPath: await writeReport(root, "legacy-late.md") };
+          },
+          async runFeedback() {
+            throw new Error("unexpected feedback");
+          }
+        }
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      claimSpy.mockRestore();
+    }
+    expect(await readState(init.workspace.stateFile)).toEqual(reclaimed);
+    expect(executorCalls).toBe(0);
+    const rejected = error instanceof AggregateError ? error.errors[0] : error;
+    expect(rejected).toMatchObject({ message: expect.stringContaining("submissionAttemptId") });
+    expect(
+      (await readdir(init.workspace.resultsDir, { recursive: true })).some((path) =>
+        path.includes("RUN-")
+      )
+    ).toBe(false);
+  });
+
   it.each([
     false,
     true

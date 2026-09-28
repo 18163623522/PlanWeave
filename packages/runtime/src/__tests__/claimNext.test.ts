@@ -10,7 +10,7 @@ import {
   submitReviewResult,
   submitFeedback
 } from "../taskManager/index.js";
-import { readState } from "../state.js";
+import { readState, writeState } from "../state.js";
 import {
   basicManifest,
   createTestWorkspace,
@@ -19,6 +19,35 @@ import {
 } from "./promptTestHelpers.js";
 
 describe("claimNext", () => {
+  it.each([
+    false,
+    true
+  ])("requires explicit recovery for a legacy in-progress implementation (parallel=%s)", async (parallel) => {
+    const { root, init } = await createTestWorkspace(
+      basicManifest({ parallel: true, maxConcurrent: 2 })
+    );
+    const claim = await claimNext({ projectRoot: root });
+    if (claim.kind !== "block") throw new Error("expected block claim");
+    const state = await readState(init.workspace.stateFile);
+    delete state.blocks[claim.ref].submissionAttemptId;
+    await writeState(init.workspace.stateFile, state);
+    const before = await readState(init.workspace.stateFile);
+    expect(await claimNext({ projectRoot: root, parallel, dryRun: true })).not.toMatchObject({
+      kind: "blocked"
+    });
+    const result = await claimNext({ projectRoot: root, parallel });
+    expect(result).toMatchObject({
+      kind: "blocked",
+      ref: claim.ref,
+      reason: expect.stringContaining("submissionAttemptId")
+    });
+    if (result.kind !== "blocked") throw new Error("expected blocked claim");
+    expect(result.reason).toMatch(/stop.*drain/i);
+    expect(result.reason).toContain("mark-blocked");
+    expect(result.reason).toContain("unblock");
+    expect(await readState(init.workspace.stateFile)).toEqual(before);
+  });
+
   it("reports effective executor inheritance on claims", async () => {
     const manifest = basicManifest();
     manifest.execution.defaultExecutor = "codex";

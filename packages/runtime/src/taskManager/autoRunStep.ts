@@ -19,6 +19,7 @@ import { writeState } from "../state.js";
 import type {
   AutoRunStepResult,
   AutoRunRunnerEvidence,
+  BlockType,
   ClaimScope,
   ClaimResult,
   ExecutionGraphSession,
@@ -41,6 +42,7 @@ import {
   submitReviewResult
 } from "./index.js";
 import { readImplementationRunMetadataFile } from "./implementationRunMetadata.js";
+import { missingImplementationClaimIdentityReason } from "./implementationClaimIdentity.js";
 import { updateTaskIndex } from "./resultIndex.js";
 import { reviewResultSchema } from "./reviewResultContract.js";
 import { submitReviewResultValue } from "./reviewSubmission.js";
@@ -179,13 +181,15 @@ function errorMessage(error: unknown): string {
 function ownsWritableBlockClaim(
   state: RuntimeState,
   ref: string,
-  submissionAttemptId: string | undefined
+  submissionAttemptId: string | undefined,
+  blockType: BlockType | undefined
 ): boolean {
   const current = state.blocks[ref];
   return (
     current?.status === "in_progress" &&
     state.currentRefs.includes(ref) &&
     !current.remoteOwnership &&
+    (blockType !== "implementation" || submissionAttemptId !== undefined) &&
     (submissionAttemptId === undefined || current.submissionAttemptId === submissionAttemptId)
   );
 }
@@ -218,7 +222,14 @@ async function markBlockPipelineFailure(options: {
         `${reason}; failed to mark the block blocked: ${errorMessage(cleanupError)}`
       );
     });
-    if (!ownsWritableBlockClaim(current.state, options.ref, options.submissionAttemptId))
+    if (
+      !ownsWritableBlockClaim(
+        current.state,
+        options.ref,
+        options.submissionAttemptId,
+        current.graph.blocksByRef.get(options.ref)?.type
+      )
+    )
       throw options.error;
     try {
       const blocked = await markBlockBlocked({ ...options, reason });
@@ -254,7 +265,7 @@ async function claimForBatchRef(options: {
     throw new Error(`Block '${options.ref}' does not exist.`);
   }
   if (block.type === "implementation" && !options.submissionAttemptId) {
-    throw new Error(`Batch claim '${options.ref}' has no captured submission attempt identity.`);
+    throw new ExecutorClaimRejectedError(missingImplementationClaimIdentityReason(options.ref));
   }
   return {
     kind: "block",
@@ -324,8 +335,14 @@ async function executeBlockClaim(options: {
   signal?: AbortSignal;
   executionWaveId?: ExecutionWaveId;
 }): Promise<SubmittedOrManualStep | BlockedStep> {
+  const submissionAttemptId = options.claim.submissionAttemptId;
   let stage: BlockPipelineStage = "Prompt rendering";
   try {
+    if (options.claim.blockType === "implementation" && !submissionAttemptId) {
+      throw new ExecutorClaimRejectedError(
+        missingImplementationClaimIdentityReason(options.claim.ref)
+      );
+    }
     const prompt = await renderPrompt({
       projectRoot: options.projectRoot,
       ref: options.claim.ref,
@@ -398,7 +415,7 @@ async function executeBlockClaim(options: {
       ref: options.claim.ref,
       reportPath: adapterResult.reportPath,
       runId: adapterResult.runId,
-      submissionAttemptId: options.claim.submissionAttemptId,
+      submissionAttemptId,
       session: options.session
     };
     const submitResult = artifact
@@ -418,7 +435,8 @@ async function executeBlockClaim(options: {
           !ownsWritableBlockClaim(
             current.state,
             options.claim.ref,
-            options.claim.submissionAttemptId
+            submissionAttemptId,
+            current.graph.blocksByRef.get(options.claim.ref)?.type
           )
         )
           throw error;
@@ -433,7 +451,7 @@ async function executeBlockClaim(options: {
     return markBlockPipelineFailure({
       projectRoot: options.projectRoot,
       ref: options.claim.ref,
-      submissionAttemptId: options.claim.submissionAttemptId,
+      submissionAttemptId,
       stage,
       error,
       runnerEvidence: options.runnerEvidence,
@@ -456,6 +474,7 @@ async function executeBatchRef(options: {
   try {
     claim = await claimForBatchRef(options);
   } catch (error) {
+    if (error instanceof ExecutorClaimRejectedError) throw error;
     return markBlockPipelineFailure({
       projectRoot: options.projectRoot,
       ref: options.ref,
@@ -492,7 +511,15 @@ async function releaseBatchRefIfInProgress(options: {
       projectRoot: options.projectRoot,
       session: options.session
     });
-    if (!ownsWritableBlockClaim(context.state, options.ref, options.submissionAttemptId)) return;
+    if (
+      !ownsWritableBlockClaim(
+        context.state,
+        options.ref,
+        options.submissionAttemptId,
+        context.graph.blocksByRef.get(options.ref)?.type
+      )
+    )
+      return;
     await releaseInProgressBlock(options);
   });
 }

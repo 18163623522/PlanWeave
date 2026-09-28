@@ -16,7 +16,8 @@ import { applyCurrentReviewResumeClaim } from "./blockStatusMutations.js";
 import { patchFeedbackArtifact } from "./feedbackArtifacts.js";
 import { createProjectGraphClaimGuard } from "./projectGraphClaimGuard.js";
 import { updateTaskIndex } from "./resultIndex.js";
-import { loadRuntime, loadRuntimeReadonly, refreshDerivedState } from "./runtimeContext.js";
+import { loadRuntimeReadonly, refreshDerivedState } from "./runtimeContext.js";
+import { missingImplementationClaimIdentityReason } from "./implementationClaimIdentity.js";
 import {
   markClaimed,
   claimedBlockState,
@@ -69,12 +70,7 @@ async function claimNextUnlocked(options: {
   session?: ExecutionGraphSession;
 }): Promise<ClaimResult> {
   const dryRun = options.dryRun === true;
-  let context: Awaited<ReturnType<typeof loadRuntime>>;
-  if (dryRun) {
-    context = await loadRuntimeReadonly(options);
-  } else {
-    context = await loadRuntime(options);
-  }
+  const context = await loadRuntimeReadonly(options);
   let { state } = context;
   const { graph, manifest, workspace } = context;
   const scope = normalizeClaimScope(options.scope);
@@ -85,6 +81,22 @@ async function claimNextUnlocked(options: {
   }
   const projectGuard = await createProjectGraphClaimGuard(context);
   const readiness = buildClaimReadiness({ graph, manifest, state, scope, blockType, projectGuard });
+
+  if (
+    !dryRun &&
+    readiness.claimOrder.kind === "currentBlock" &&
+    readiness.claimOrder.result.blockType === "implementation" &&
+    !state.blocks[readiness.claimOrder.ref].submissionAttemptId
+  ) {
+    return {
+      kind: "blocked",
+      ref: readiness.claimOrder.ref,
+      reason: missingImplementationClaimIdentityReason(readiness.claimOrder.ref)
+    };
+  }
+  if (!dryRun && JSON.stringify(context.rawState) !== JSON.stringify(state)) {
+    await writeState(workspace.stateFile, state);
+  }
 
   if (readiness.claimOrder.kind === "blocked") {
     return readiness.claimOrder.result;
