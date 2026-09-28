@@ -1307,6 +1307,7 @@ export const enCatalog = {
   taskWorkspaceRunLabel: "{blockTitle} run {retryIndex}",
   taskWorkspaceRunId: "Run ID",
   taskWorkspaceStartedAt: "Started",
+  taskWorkspaceSubmittedAt: "Submitted",
   taskWorkspaceActualConfiguration: "Actual configuration",
   taskWorkspaceArtifactFeedback: "Feedback",
   taskWorkspaceArtifactImplementation: "Implementation",

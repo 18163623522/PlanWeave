@@ -2,6 +2,7 @@ import type { TaskWorkspace, TaskWorkspaceBlock } from "@planweave-ai/runtime";
 import type {
   TaskWorkspaceTimelineProjection,
   TimelineDefaultSelectionContext,
+  TimelineEventTime,
   TimelineRunProjection,
   TimelineRunStatus,
   TimelineSelection,
@@ -14,6 +15,7 @@ type RunSeed = {
   block: TaskWorkspaceBlock;
   blockIndex: number;
   item: RunItem;
+  eventTime: TimelineEventTime;
   ordinal: number;
 };
 
@@ -85,29 +87,34 @@ function waveMemberships(seeds: RunSeed[]): Map<string, TimelineWaveMembership> 
   return memberships;
 }
 
-function startedAtMs(item: RunItem): number | null {
-  const value = item.run.duration.startedAt;
-  if (value === null) return null;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
+function runEventTime(item: RunItem): TimelineEventTime {
+  const startedAt = item.run.duration.startedAt;
+  const value = startedAt ?? item.run.metadata.submittedAt;
+  if (value !== null) {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) {
+      return { kind: startedAt !== null ? "started" : "submitted", value, timestamp };
+    }
+  }
+  return { kind: "unknown", value: null, timestamp: null };
 }
 
 function chronologicalRuns(
   seeds: RunSeed[],
   memberships: Map<string, TimelineWaveMembership>
 ): RunSeed[] {
-  const groupStart = new Map<string, { ordinal: number; startedAt: number | null }>();
+  const groupOrder = new Map<string, { ordinal: number; timestamp: number | null }>();
   for (const seed of seeds) {
     const membership = memberships.get(seed.item.run.record.recordId);
     const groupKey = membership ? `wave:${membership.waveId}` : `run:${seed.ordinal}`;
-    const timestamp = startedAtMs(seed.item);
-    const existing = groupStart.get(groupKey);
-    groupStart.set(groupKey, {
+    const timestamp = seed.eventTime.timestamp;
+    const existing = groupOrder.get(groupKey);
+    groupOrder.set(groupKey, {
       ordinal: Math.min(existing?.ordinal ?? seed.ordinal, seed.ordinal),
-      startedAt:
+      timestamp:
         timestamp === null
-          ? (existing?.startedAt ?? null)
-          : Math.min(existing?.startedAt ?? timestamp, timestamp)
+          ? (existing?.timestamp ?? null)
+          : Math.min(existing?.timestamp ?? timestamp, timestamp)
     });
   }
   return [...seeds].sort((left, right) => {
@@ -120,14 +127,14 @@ function chronologicalRuns(
         ? left.item.retryIndex - right.item.retryIndex
         : left.blockIndex - right.blockIndex;
     }
-    const leftOrder = groupStart.get(leftGroup)!;
-    const rightOrder = groupStart.get(rightGroup)!;
-    if (leftOrder.startedAt !== null && rightOrder.startedAt !== null) {
-      const timestampOrder = leftOrder.startedAt - rightOrder.startedAt;
+    const leftOrder = groupOrder.get(leftGroup)!;
+    const rightOrder = groupOrder.get(rightGroup)!;
+    if (leftOrder.timestamp !== null && rightOrder.timestamp !== null) {
+      const timestampOrder = leftOrder.timestamp - rightOrder.timestamp;
       if (timestampOrder !== 0) return timestampOrder;
-    } else if (leftOrder.startedAt !== null) {
+    } else if (leftOrder.timestamp !== null) {
       return -1;
-    } else if (rightOrder.startedAt !== null) {
+    } else if (rightOrder.timestamp !== null) {
       return 1;
     }
     return leftOrder.ordinal - rightOrder.ordinal;
@@ -137,11 +144,13 @@ function chronologicalRuns(
 function projectRun(
   block: TaskWorkspaceBlock,
   item: RunItem,
+  eventTime: TimelineEventTime,
   memberships: Map<string, TimelineWaveMembership>
 ): TimelineRunProjection {
   const { record } = item.run;
   return {
     active: item.active,
+    eventTime,
     blockRef: block.ref,
     blockTitle: block.title,
     executionWave: memberships.get(record.recordId) ?? null,
@@ -160,20 +169,29 @@ export function projectTaskWorkspaceTimeline(
   workspace: TaskWorkspace
 ): TaskWorkspaceTimelineProjection {
   let ordinal = 0;
-  const seeds = workspace.blocks.flatMap((block, blockIndex) =>
-    stableRunItems(block).map((item) => ({ block, blockIndex, item, ordinal: ordinal++ }))
+  const seedsByBlock = workspace.blocks.map((block, blockIndex) =>
+    stableRunItems(block).map((item) => ({
+      block,
+      blockIndex,
+      item,
+      eventTime: runEventTime(item),
+      ordinal: ordinal++
+    }))
   );
+  const seeds = seedsByBlock.flat();
   const memberships = waveMemberships(seeds);
-  const blocks = workspace.blocks.map((block) => ({
+  const blocks = workspace.blocks.map((block, blockIndex) => ({
     annotations: block.annotations,
     blockId: block.blockId,
     ref: block.ref,
-    runs: stableRunItems(block).map((item) => projectRun(block, item, memberships)),
+    runs: seedsByBlock[blockIndex]!.map((seed) =>
+      projectRun(block, seed.item, seed.eventTime, memberships)
+    ),
     title: block.title,
     type: block.type
   }));
   const runs = chronologicalRuns(seeds, memberships).map((seed) =>
-    projectRun(seed.block, seed.item, memberships)
+    projectRun(seed.block, seed.item, seed.eventTime, memberships)
   );
   return { blocks, runs };
 }

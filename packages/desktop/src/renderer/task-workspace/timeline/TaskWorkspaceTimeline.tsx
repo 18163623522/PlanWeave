@@ -187,7 +187,9 @@ function TimelineRunOption({
     run.item.run.metadata.executor ??
     run.item.run.metadata.adapter ??
     labels.unavailable;
-  const startedAt = run.startedAt ? labels.formatDateTime(run.startedAt) : labels.unavailable;
+  const eventTime = run.eventTime.value
+    ? labels.formatDateTime(run.eventTime.value)
+    : labels.unavailable;
   // Leaf owns the clock: only this text node re-renders on the 1 Hz tick.
   const elapsed = (
     <LiveRunElapsedText
@@ -251,9 +253,9 @@ function TimelineRunOption({
         <dd className="truncate font-mono" title={run.runId}>
           {run.runId}
         </dd>
-        <dt>{labels.startedAt}</dt>
-        <dd className="truncate" title={startedAt}>
-          {startedAt}
+        <dt>{run.eventTime.kind === "submitted" ? labels.submittedAt : labels.startedAt}</dt>
+        <dd className="truncate" title={eventTime}>
+          {eventTime}
         </dd>
         <dt>{labels.elapsed}</dt>
         <dd className="truncate tabular-nums">{elapsed}</dd>

@@ -13,6 +13,75 @@ import {
 } from "./helpers/taskWorkspaceTimelineFixture";
 
 describe("Task Workspace timeline projection", () => {
+  it.each<[string, string | null, string | null, string | null, string | null, string[]]>([
+    [
+      "older manual",
+      null,
+      "2026-07-12T00:00:00Z",
+      "2026-07-13T00:00:00Z",
+      null,
+      ["RUN-A", "RUN-B"]
+    ],
+    [
+      "newer manual",
+      "2026-07-12T00:00:00Z",
+      null,
+      null,
+      "2026-07-13T00:00:00Z",
+      ["RUN-A", "RUN-B"]
+    ],
+    [
+      "manual across blocks",
+      null,
+      "2026-07-14T00:00:00Z",
+      null,
+      "2026-07-13T00:00:00Z",
+      ["RUN-B", "RUN-A"]
+    ],
+    [
+      "equal event times",
+      null,
+      "2026-07-13T00:00:00Z",
+      "2026-07-13T00:00:00Z",
+      null,
+      ["RUN-A", "RUN-B"]
+    ],
+    ["unknown times", null, null, null, null, ["RUN-A", "RUN-B"]],
+    [
+      "start takes precedence",
+      "2026-07-12T00:00:00Z",
+      "2026-07-14T00:00:00Z",
+      "2026-07-13T00:00:00Z",
+      null,
+      ["RUN-A", "RUN-B"]
+    ]
+  ])("orders %s and defaults to the latest event", (_name, startA, submitA, startB, submitB, expected) => {
+    const first = timelineRunFixture("T-001#B-001", "RUN-A");
+    const second = timelineRunFixture("T-001#B-002", "RUN-B");
+    first.run.duration.startedAt = startA;
+    first.run.metadata.submittedAt = submitA;
+    second.run.duration.startedAt = startB;
+    second.run.metadata.submittedAt = submitB;
+    for (const item of [first, second]) {
+      if (item.run.duration.startedAt === null) {
+        item.run.duration.finishedAt = null;
+        item.run.duration.wallClockMs = null;
+        item.run.duration.unavailableReason = "No execution timing recorded.";
+      }
+    }
+    const workspace = timelineWorkspaceFixture([
+      timelineBlockFixture({ blockId: "B-001", runs: [first] }),
+      timelineBlockFixture({ blockId: "B-002", runs: [second] })
+    ]);
+    const original = structuredClone(workspace);
+    const projection = projectTaskWorkspaceTimeline(workspace);
+    expect(projection.runs.map((run) => run.runId)).toEqual(expected);
+    expect(defaultTimelineSelection(workspace)?.recordId).toBe(
+      expected[1] === "RUN-A" ? first.run.record.recordId : second.run.record.recordId
+    );
+    expect(workspace).toEqual(original);
+  });
+
   it("shows report submissions as submitted without fabricated completion timing", () => {
     const item = timelineRunFixture("T-001#B-001", "RUN-001");
     item.active = false;

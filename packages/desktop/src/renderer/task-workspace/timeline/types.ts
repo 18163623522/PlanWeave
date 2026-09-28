@@ -19,11 +19,16 @@ export interface TimelineWaveMembership {
   waveId: string;
 }
 
+export type TimelineEventTime =
+  | { kind: "started" | "submitted"; value: string; timestamp: number }
+  | { kind: "unknown"; value: null; timestamp: null };
+
 export interface TimelineRunProjection {
   active: boolean;
   blockRef: string;
   blockTitle: string;
   executionWave: TimelineWaveMembership | null;
+  eventTime: TimelineEventTime;
   finishedAt: string | null;
   isRetry: boolean;
   item: TaskWorkspaceBlock["runs"][number];
@@ -87,6 +92,7 @@ export interface TaskWorkspaceTimelineLabels {
   runId: string;
   running: string;
   startedAt: string;
+  submittedAt: string;
   timeline: string;
   unavailable: string;
   waiting: string;

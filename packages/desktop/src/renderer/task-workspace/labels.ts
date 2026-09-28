@@ -235,6 +235,7 @@ export function taskWorkspaceTimelineLabels(t: Translator): TaskWorkspaceTimelin
     runId: t("taskWorkspaceRunId"),
     running: t("taskWorkspaceRunning"),
     startedAt: t("taskWorkspaceStartedAt"),
+    submittedAt: t("taskWorkspaceSubmittedAt"),
     timeline: t("taskWorkspaceTimeline"),
     unavailable: t("unavailable"),
     waiting: t("taskWorkspaceWaiting")

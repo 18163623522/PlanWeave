@@ -4,6 +4,8 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createTranslator } from "../renderer/i18n";
+import { taskWorkspaceTimelineLabels } from "../renderer/task-workspace/labels";
 import { TaskWorkspaceTimeline } from "../renderer/task-workspace/timeline";
 import type { TaskWorkspaceTimelineLabels } from "../renderer/task-workspace/timeline";
 import { cleanupRendererTestEnvironment } from "./helpers/rendererTestEnvironment";
@@ -56,6 +58,7 @@ const labels: TaskWorkspaceTimelineLabels = {
   runId: "Run ID",
   running: "Running",
   startedAt: "Started",
+  submittedAt: "Submitted",
   timeline: "Timeline",
   unavailable: "Unavailable",
   waiting: "Waiting"
@@ -107,6 +110,53 @@ function timelineProps() {
 }
 
 describe("TaskWorkspaceTimeline", () => {
+  it.each([
+    "en",
+    "zh-CN"
+  ] as const)("labels manual submissions in %s and keeps history selected on refresh", (language) => {
+    const translated = taskWorkspaceTimelineLabels(createTranslator(language));
+    const fixture = timelineProps();
+    fixture.first.run.metadata.runnerKind = null;
+    fixture.first.run.metadata.submittedAt = "2026-07-12T00:00:00.000Z";
+    fixture.first.run.duration.startedAt = null;
+    fixture.first.run.duration.finishedAt = null;
+    fixture.first.run.duration.wallClockMs = null;
+    fixture.first.run.duration.unavailableReason = "No execution timing recorded.";
+    const props = {
+      getRunScrollTop: () => 0,
+      labels: { ...labels, startedAt: translated.startedAt, submittedAt: translated.submittedAt },
+      onRunScrollTopChange: vi.fn(),
+      selectRun: vi.fn(),
+      selectAnnotation: vi.fn(),
+      selectedAnnotation: null,
+      selectedRecordId: fixture.first.run.record.recordId,
+      setTimelineWidth: vi.fn(),
+      timelineWidth: 280
+    };
+    const workspace = timelineWorkspaceFixture([
+      timelineBlockFixture({ blockId: "B-001", runs: [fixture.first] }),
+      timelineBlockFixture({ blockId: "B-002", runs: [fixture.third] })
+    ]);
+    const { rerender } = render(<TaskWorkspaceTimeline {...props} workspace={workspace} />);
+    const manual = screen.getByRole("option", { name: "B-001 run 1" });
+    expect(manual).toHaveTextContent(
+      `${language === "en" ? "Submitted" : "提交于"}2026-07-12T00:00:00.000Z`
+    );
+    expect(manual).toHaveTextContent("ElapsedUnavailable");
+    expect(manual).not.toHaveTextContent(translated.startedAt);
+    expect(manual).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: "B-002 run 1" })).toHaveAttribute(
+      "data-status",
+      "active"
+    );
+    rerender(<TaskWorkspaceTimeline {...props} workspace={structuredClone(workspace)} />);
+    expect(screen.getByRole("option", { name: "B-001 run 1" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(props.selectRun).not.toHaveBeenCalled();
+  });
+
   it("renders the overview, exposes run details, and can select the overview", () => {
     const fixture = timelineProps();
     const selectRun = vi.fn();

@@ -1215,6 +1215,7 @@ export const zhCnCatalog = {
   taskWorkspaceRunLabel: "{blockTitle} 第 {retryIndex} 次运行",
   taskWorkspaceRunId: "运行 ID",
   taskWorkspaceStartedAt: "开始时间",
+  taskWorkspaceSubmittedAt: "提交于",
   taskWorkspaceActualConfiguration: "实际配置",
   taskWorkspaceArtifactFeedback: "反馈",
   taskWorkspaceArtifactImplementation: "实现",
