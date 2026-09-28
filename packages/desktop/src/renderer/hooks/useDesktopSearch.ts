@@ -8,6 +8,7 @@ import type {
   ValidationIssue
 } from "@planweave-ai/runtime";
 import { bridge } from "../bridge";
+import { useSearchInvalidation } from "./useSearchInvalidation";
 import { searchNavigationTarget } from "../components/SearchResultList";
 import {
   blockWorkspaceTarget,
@@ -41,6 +42,8 @@ const bodySearchResultKinds = new Set<DesktopSearchResultKind>([
 ]);
 
 type UseDesktopSearchArgs = {
+  enabled?: boolean;
+  packageFingerprint?: string;
   openRunWorkspace: (locator: {
     projectRoot: string;
     canvasId: string;
@@ -63,6 +66,8 @@ function selectedKindsNeedBodySearch(kinds: DesktopSearchResultKind[]): boolean 
 }
 
 export function useDesktopSearch({
+  enabled = true,
+  packageFingerprint,
   openRunWorkspace,
   openTaskWorkspace,
   selectedCanvasId,
@@ -79,7 +84,7 @@ export function useDesktopSearch({
     DesktopSearchResultKind[]
   >(() => [...desktopSearchResultKinds]);
   const [searchCanvasScope, setSearchCanvasScope] = useState<DesktopSearchCanvasScope>("all");
-  const lastSearchKeyRef = useRef<string | null>(null);
+  const requestSequence = useRef(0);
   const setErrorRef = useRef(setError);
   useEffect(() => {
     setErrorRef.current = setError;
@@ -123,6 +128,12 @@ export function useDesktopSearch({
   const rawQueryIsEmpty = !normalizedSearchQuery;
   const canvasFilterId =
     searchCanvasScope === "current" && selectedCanvasId ? selectedCanvasId : undefined;
+  const { active, revision } = useSearchInvalidation({
+    enabled,
+    projectRoot,
+    canvasFilterId,
+    packageFingerprint
+  });
   const searchKey = useMemo(() => {
     if (!projectRoot || !normalizedDebouncedQuery) {
       return null;
@@ -131,23 +142,22 @@ export function useDesktopSearch({
       projectRoot,
       normalizedDebouncedQuery.toLowerCase(),
       selectedSearchKindKey,
-      canvasFilterId ?? "all"
+      canvasFilterId ?? "all",
+      revision
     ].join("\u001f");
-  }, [canvasFilterId, normalizedDebouncedQuery, projectRoot, selectedSearchKindKey]);
+  }, [canvasFilterId, normalizedDebouncedQuery, projectRoot, revision, selectedSearchKindKey]);
 
   useEffect(() => {
     if (!bridge || !projectRoot || rawQueryIsEmpty) {
       clearSearchResults();
       clearSearchDiagnostics();
       setSearchStatus({ phase: "idle" });
-      lastSearchKeyRef.current = null;
       return;
     }
     if (normalizedSearchQuery !== normalizedDebouncedQuery) {
       clearSearchResults();
       clearSearchDiagnostics();
       setSearchStatus({ phase: "debouncing" });
-      lastSearchKeyRef.current = null;
     }
   }, [
     clearSearchDiagnostics,
@@ -163,7 +173,6 @@ export function useDesktopSearch({
       clearSearchResults();
       clearSearchDiagnostics();
       setSearchStatus({ phase: "idle" });
-      lastSearchKeyRef.current = null;
       return;
     }
     if (
@@ -173,11 +182,11 @@ export function useDesktopSearch({
     ) {
       return;
     }
-    if (lastSearchKeyRef.current === searchKey) {
+    if (!active) {
       return;
     }
     const desktopBridge = bridge;
-    lastSearchKeyRef.current = searchKey;
+    const requestId = ++requestSequence.current;
     let cancelled = false;
     const filters: DesktopSearchFilters = {
       kinds: selectedSearchResultKinds
@@ -189,7 +198,7 @@ export function useDesktopSearch({
     const bodyFilters = selectedKindsNeedBodySearch(selectedSearchResultKinds)
       ? { ...filters, includeBodies: true }
       : null;
-    const isLatestSearch = () => !cancelled && lastSearchKeyRef.current === searchKey;
+    const isLatestSearch = () => !cancelled && requestSequence.current === requestId;
     const applySummaryResults = (projection: DesktopSearchProjection) => {
       if (!isLatestSearch()) {
         return;
@@ -226,7 +235,7 @@ export function useDesktopSearch({
       setSearchStatus({ phase: "error", message });
       setErrorRef.current(message);
     };
-    if (!cancelled && lastSearchKeyRef.current === searchKey) {
+    if (!cancelled && requestSequence.current === requestId) {
       clearSearchResults();
       clearSearchDiagnostics();
       setSearchStatus({ phase: "summary_loading" });
@@ -257,6 +266,7 @@ export function useDesktopSearch({
       cancelled = true;
     };
   }, [
+    active,
     canvasFilterId,
     clearSearchDiagnostics,
     clearSearchResults,

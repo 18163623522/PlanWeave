@@ -495,6 +495,8 @@ export function ProjectWorkspaceProvider({
   });
 
   const searchController = useSearchController({
+    enabled: activeView === "search",
+    packageFingerprint: graph?.packageFingerprint,
     openRunWorkspace: openSearchRunWorkspace,
     openTaskWorkspace: (target) => openTaskWorkspaceFrom("search", target),
     selectedCanvasId,

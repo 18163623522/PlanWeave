@@ -147,6 +147,7 @@
         "desktopRuntimeRefreshHook.test.tsx",
         "desktopRuntimeSubscriptionsHook.test.tsx",
         "desktopSearchHook.test.tsx",
+        "desktopSearchInvalidation.test.tsx",
         "desktopSettingsBridge.test.tsx",
         "desktopSettingsEffects.test.tsx",
         "diagnosticFixActions.test.ts",

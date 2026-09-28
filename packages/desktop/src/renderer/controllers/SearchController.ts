@@ -20,12 +20,16 @@ export function createSearchController(props: SearchControllerInput): SearchCont
 }
 
 export function useSearchController({
+  enabled,
+  packageFingerprint,
   openRunWorkspace,
   openTaskWorkspace,
   selectedCanvasId,
   selectedProject,
   setError
 }: {
+  enabled: boolean;
+  packageFingerprint?: string;
   openRunWorkspace: (locator: {
     projectRoot: string;
     canvasId: string;
@@ -50,6 +54,8 @@ export function useSearchController({
     setSearchQuery,
     setSearchResultKindEnabled
   } = useDesktopSearch({
+    enabled,
+    packageFingerprint,
     openRunWorkspace,
     openTaskWorkspace,
     selectedCanvasId,
