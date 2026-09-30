@@ -174,6 +174,16 @@ export default defineConfig({
               priority: 14
             },
             {
+              // Review drafts stay mounted in the shell while the editor view remains lazy.
+              name: "review-pipeline",
+              test: (id) =>
+                id.endsWith("/renderer/hooks/useReviewPipeline.ts") ||
+                id.endsWith("/renderer/hooks/reviewPipelineDraft.ts") ||
+                id.endsWith("/renderer/hooks/reviewPipelineDraftState.ts") ||
+                /\/desktop\/reviewPipelineStepContent\.(?:js|ts)$/.test(id),
+              priority: 15
+            },
+            {
               // Settings is a secondary route with several independent administration
               // surfaces. Keep it out of the startup shell while preserving its lazy
               // Host administration boundary.
