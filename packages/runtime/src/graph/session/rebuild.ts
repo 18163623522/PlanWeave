@@ -1,10 +1,11 @@
 import { join } from "node:path";
 import { readJsonFile } from "../../json.js";
 import { createPackageFileSnapshotFromPackageRoot } from "../../package/fileChanges.js";
+import { manifestSchema } from "../../schema/manifest.js";
 import type { ExecutionGraphSession, PlanPackageManifest } from "../../types.js";
 
 export async function readManifest(packageRoot: string): Promise<PlanPackageManifest> {
-  return readJsonFile<PlanPackageManifest>(join(packageRoot, "manifest.json"));
+  return manifestSchema.parse(await readJsonFile<unknown>(join(packageRoot, "manifest.json")));
 }
 
 export async function rebuildSessionFromPackage(session: ExecutionGraphSession): Promise<void> {
