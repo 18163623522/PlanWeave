@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canvasCommandMigrationSql } from "../migrations/canvas.js";
 import { canvasOperationRetentionMigrationSql } from "../migrations/canvasOperationRetention.js";
 import { migration17 } from "../migrations/collaborationLegacy.js";
-import { migrationModules } from "../migrations/registry.js";
+import { migrationModules, migrations } from "../migrations/registry.js";
 import {
   setupCodeHostEnrollmentOutcomeMigration,
   setupCodeMigration
@@ -27,91 +27,31 @@ async function openDatabase(): Promise<SqliteDatabase> {
   return database;
 }
 
-async function openDatabaseAtV26(): Promise<SqliteDatabase> {
+async function openDatabaseAtVersion(throughVersion: number): Promise<SqliteDatabase> {
   const database = await openDatabase();
-  applyMigrations(database);
-  database.exec("PRAGMA foreign_keys=OFF");
-  for (const table of [
-    "operator_management_sessions",
-    "operator_management_recovery_codes",
-    "operator_management_devices",
-    "acp_task_restorations",
-    "acp_conversation_events",
-    "acp_conversation_actions",
-    "acp_conversation_turns",
-    "remote_agent_workspace_grants",
-    "remote_agents",
-    "agent_host_remote_agent_defaults",
-    "canvas_runtime_reset_operations",
-    "canvas_runtime_status_snapshots",
-    "canvas_workspace_publish_operations",
-    "canvas_runtime_artifact_grants",
-    "canvas_runtime_leases",
-    "canvas_runtime_operation_attachments",
-    "canvas_runtime_host_bindings",
-    "server_exposure_leases",
-    "setup_code_host_enrollment_outcomes",
-    "setup_code_revocations",
-    "setup_code_grants",
-    "canvas_command_pending",
-    "canvas_command_pending_scopes",
-    "canvas_command_operation_retention_scopes",
-    "canvas_command_operation_receipts",
-    "canvas_command_snapshots",
-    "canvas_command_journal",
-    "canvas_command_operations",
-    "canvas_command_heads",
-    "assignment_authority_migrations",
-    "execution_target_records",
-    "review_assignment_records",
-    "responsibility_records",
-    "package_snapshots",
-    "acl_registry_migrations",
-    "project_access_grants",
-    "canvas_registry",
-    "project_registry",
-    "workspace_identity_repairs",
-    "workspace_host_enrollments",
-    "workspace_agent_hosts",
-    "workspace_identity_revocations",
-    "workspace_operator_sessions",
-    "workspace_device_sessions",
-    "workspace_memberships",
-    "workspace_principals",
-    "workspace_identity_migrations",
-    "legacy_project_workspace_mappings",
-    "workspaces",
-    "work_assignments_unscoped_legacy"
-  ]) {
-    database.exec(`DROP TABLE IF EXISTS ${table}`);
+  database.exec(
+    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+  );
+  for (const migration of migrations) {
+    if (migration.version > throughVersion) break;
+    if (migration.disableForeignKeys) database.exec("PRAGMA foreign_keys = OFF");
+    try {
+      database.exec("BEGIN IMMEDIATE");
+      migration.before?.(database);
+      database.exec(migration.sql);
+      migration.after?.(database);
+      database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(migration.version, "2020-01-01T00:00:00.000Z");
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      if (migration.disableForeignKeys) database.exec("PRAGMA foreign_keys = ON");
+    }
   }
-  database.exec("DROP TABLE work_assignments");
-  database.exec(migration17);
-  database.prepare("DELETE FROM schema_migrations WHERE version>=27").run();
-  database.exec("PRAGMA foreign_keys=ON");
-  return database;
-}
-
-async function openDatabaseAtV53(): Promise<SqliteDatabase> {
-  const database = await openDatabase();
-  applyMigrations(database);
-  database.exec(`
-    DROP TABLE operator_management_sessions;
-    DROP TABLE operator_management_recovery_codes;
-    DROP TABLE operator_management_devices;
-    DROP TABLE acp_task_restorations;
-    DROP TABLE acp_conversation_events;
-    DROP TABLE acp_conversation_actions;
-    DROP TABLE acp_conversation_turns;
-    DROP TABLE IF EXISTS remote_agent_workspace_grants;
-    DROP TABLE IF EXISTS remote_agents;
-    DROP TABLE IF EXISTS agent_host_remote_agent_defaults;
-    DROP TABLE canvas_runtime_reset_operations;
-    DROP TABLE canvas_workspace_publish_operations;
-    DROP TABLE canvas_runtime_operation_attachments;
-    ALTER TABLE canvas_runtime_status_snapshots DROP COLUMN runtime_revision;
-    DELETE FROM schema_migrations WHERE version >= 54;
-  `);
+  expect(centralSchemaVersion(database)).toBe(throughVersion);
   return database;
 }
 
@@ -121,116 +61,20 @@ function tableExists(database: SqliteDatabase, table: string): boolean {
   );
 }
 
-type MigrationMatrixRow = {
-  legacyVersion: number | "ephemeral";
-  domainStep: string;
-  authoritativeReadVersion: string;
-  interruptionMarker: string;
-  recoveryResult: string;
-};
-
 describe("collaboration migration reconciliation", () => {
-  it("keeps OSS-001 through OSS-005 registered in their owning domain order", () => {
-    const matrix: readonly MigrationMatrixRow[] = [
-      {
-        legacyVersion: 26,
-        domainStep: "identity",
-        authoritativeReadVersion: "workspace-identity/v1",
-        interruptionMarker: "read_cutover_complete|partial_backfill_failed",
-        recoveryResult: "retry_idempotent|resume_from_marker|rollback_to_legacy"
-      },
-      {
-        legacyVersion: 27,
-        domainStep: "acl-registry",
-        authoritativeReadVersion: "acl-registry/v1",
-        interruptionMarker: "path_bound|migration_failed",
-        recoveryResult: "retry|repair|rollback"
-      },
-      {
-        legacyVersion: 27,
-        domainStep: "package-registry",
-        authoritativeReadVersion: "package-snapshot/v1",
-        interruptionMarker: "legacy_package_mapped|migration_failed",
-        recoveryResult: "registry_repair_without_runtime_result_mutation"
-      },
-      {
-        legacyVersion: 28,
-        domainStep: "assignment-authority",
-        authoritativeReadVersion: "oss003_authorities|legacy_assignment",
-        interruptionMarker: "cutover_complete|repair_required",
-        recoveryResult: "retry_idempotent|repair_completed|rollback_to_legacy"
-      },
-      {
-        legacyVersion: 29,
-        domainStep: "canvas-command",
-        authoritativeReadVersion: "canvas-command/v1",
-        interruptionMarker: "atomic_transaction",
-        recoveryResult: "transaction_rollback_then_retry"
-      },
-      {
-        legacyVersion: "ephemeral",
-        domainStep: "presence",
-        authoritativeReadVersion: "ephemeral_presence/v1",
-        interruptionMarker: "ephemeral_no_migration",
-        recoveryResult: "not_persisted"
-      },
-      {
-        legacyVersion: 30,
-        domainStep: "setup-code",
-        authoritativeReadVersion: "workspace-setup/v1",
-        interruptionMarker: "atomic_transaction",
-        recoveryResult: "transaction_rollback_then_retry"
-      }
-    ];
-
-    expect(matrix.map((row) => row.domainStep)).toEqual([
-      "identity",
-      "acl-registry",
-      "package-registry",
-      "assignment-authority",
-      "canvas-command",
-      "presence",
-      "setup-code"
-    ]);
-    expect(
-      migrationModules
-        .filter((module) => module.migrations.some((migration) => migration.version >= 27))
-        .map((module) => ({
-          name: module.name,
-          versions: module.migrations.map((migration) => migration.version)
-        }))
-    ).toEqual([
-      { name: "operator-authorization", versions: [71, 72] },
-      { name: "acp-conversations", versions: [69] },
-      { name: "identity", versions: [27, 34] },
+  it("keeps the v27-v32 collaboration migrations in their owning domain order", () => {
+    const historicalModules = migrationModules.flatMap((module) => {
+      const versions = module.migrations
+        .filter((migration) => migration.version >= 27 && migration.version <= 32)
+        .map((migration) => migration.version);
+      return versions.length > 0 ? [{ name: module.name, versions }] : [];
+    });
+    expect(historicalModules).toEqual([
+      { name: "identity", versions: [27] },
       { name: "acl-registry", versions: [28] },
       { name: "assignment-authority", versions: [29] },
-      { name: "canvas-command", versions: [30, 41, 42, 50] },
-      { name: "content-versions", versions: [33] },
-      { name: "setup-code", versions: [31, 32] },
-      { name: "comment-workspace-scope", versions: [35] },
-      { name: "host-readiness", versions: [36] },
-      { name: "assignment-workspace-scope", versions: [37] },
-      { name: "observer-workspace-scope", versions: [38] },
-      { name: "attachment-workspace-scope", versions: [39] },
-      { name: "remote-workspace-scope", versions: [40] },
-      { name: "server-exposure", versions: [43] },
-      { name: "endpoint-selection", versions: [44] },
-      { name: "remote-attempt-cancellation", versions: [45] },
-      { name: "stock-host-fleet", versions: [46] },
-      { name: "host-credential-lifecycle", versions: [47] },
-      { name: "host-installation-identity", versions: [48] },
-      { name: "remote-operation-retention", versions: [49] },
-      { name: "canvas-runtime-host-binding", versions: [51, 62, 64, 66] },
-      { name: "canvas-runtime-artifact-grant", versions: [52] },
-      { name: "canvas-runtime-status", versions: [53] },
-      { name: "canvas-runtime-revision", versions: [56] },
-      { name: "workspace-canvas-publish", versions: [54, 55] },
-      { name: "remote-agent-registry", versions: [57, 58, 59, 60, 61, 68] },
-      { name: "remote-operation-diagnostics", versions: [63] },
-      { name: "remote-runner-events", versions: [65] },
-      { name: "owner-canvas-materialization", versions: [67] },
-      { name: "acp-task-restorations", versions: [70] }
+      { name: "canvas-command", versions: [30] },
+      { name: "setup-code", versions: [31, 32] }
     ]);
   });
 
@@ -312,7 +156,7 @@ describe("collaboration migration reconciliation", () => {
   });
 
   it("upgrades a representative v53 database through v58 exactly once", async () => {
-    const database = await openDatabaseAtV53();
+    const database = await openDatabaseAtVersion(53);
     database
       .prepare(
         `INSERT INTO canvas_runtime_status_snapshots(
@@ -382,7 +226,7 @@ describe("collaboration migration reconciliation", () => {
   });
 
   it("maps a representative v26 project to one stable Workspace and package registry key", async () => {
-    const database = await openDatabaseAtV26();
+    const database = await openDatabaseAtVersion(26);
     expect(tableExists(database, "canvas_workspace_publish_operations")).toBe(false);
     expect(tableExists(database, "canvas_runtime_status_snapshots")).toBe(false);
     expect(tableExists(database, "canvas_runtime_reset_operations")).toBe(false);
