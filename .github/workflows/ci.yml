@@ -103,6 +103,33 @@ jobs:
       - name: Check test suite classification
         run: node scripts/check-test-suite-classification.mjs
 
+  dependency-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Keep registry and parser failures visible alongside vulnerability findings.
+      - name: Audit dependencies (high/critical)
+        run: pnpm audit:security
+
   node-22-13-compatibility:
     name: Node.js 22.13 compatibility
     runs-on: ubuntu-latest
@@ -161,6 +188,26 @@ jobs:
 
   ubuntu-gate:
     name: Ubuntu build, lint, and unit tests
+    needs:
+      - dependency-audit
+      - ubuntu-tests
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require security audit and Ubuntu validation
+        env:
+          AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          UBUNTU_RESULT: ${{ needs.ubuntu-tests.result }}
+        run: |
+          if [[ "$AUDIT_RESULT" != "success" || "$UBUNTU_RESULT" != "success" ]]; then
+            echo "Security audit: $AUDIT_RESULT; Ubuntu validation: $UBUNTU_RESULT"
+            exit 1
+          fi
+
+  ubuntu-tests:
+    name: Ubuntu build, lint, and unit test execution
     needs: test-suite-classification
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -182,12 +229,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Audit the production dependency graph at the high/critical threshold. Do not
-      # ignore package-manager failures: registry transport and audit-parser errors must
-      # fail this gate instead of being reported as a clean audit.
-      - name: Audit dependencies (high/critical)
-        run: npx --yes pnpm@11.4.0 audit --prod --audit-level=high
 
       # cli/desktop/mcp resolve @planweave-ai/runtime (and desktop also mcp) from
       # package exports that point at dist/. The root build prepares shared
