@@ -9,6 +9,7 @@ import {
 import { loadPackage } from "../package/loadPackage.js";
 import { executePlanGraphCommand, type PlanGraphCommandResult } from "../plangraph/index.js";
 import { resolvePackagePath } from "../package/resolvePackagePath.js";
+import { normalizeReviewPipelineStepContent } from "./reviewPipelineStepContent.js";
 import { invalidateDesktopProjectProjection } from "./graph/projectProjectionModel.js";
 import type {
   GraphEditResult,
@@ -32,14 +33,6 @@ function reviewRef(taskId: string, blockId: string): string {
   return `${taskId}#${blockId}`;
 }
 
-function requireNonEmpty(value: string, field: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    throw new Error(`${field} must not be empty.`);
-  }
-  return trimmed;
-}
-
 function nextReviewBlockId(task: ManifestTaskNode, used: Set<string>): string {
   let index = task.blocks.filter((block) => block.type === "review").length + 1;
   while (used.has(`R-${String(index).padStart(3, "0")}`)) {
@@ -48,10 +41,6 @@ function nextReviewBlockId(task: ManifestTaskNode, used: Set<string>): string {
   const id = `R-${String(index).padStart(3, "0")}`;
   used.add(id);
   return id;
-}
-
-function defaultPrompt(title: string): string {
-  return `# ${title}\n\nReview the completed work and return passed or needs_changes feedback.`;
 }
 
 function promptPath(taskId: string, blockId: string): string {
@@ -82,27 +71,29 @@ function normalizeStep(options: {
   usedBlockIds: Set<string>;
   step: DesktopReviewPipelineStepInput;
   fallbackDependency: string | null;
+  content: ReturnType<typeof normalizeReviewPipelineStepContent>;
 }): ManifestReviewBlock {
   const blockId =
     options.step.blockId?.trim() || nextReviewBlockId(options.task, options.usedBlockIds);
   options.usedBlockIds.add(blockId);
   const existing = options.existing.get(blockId);
+  const content = options.content;
   return {
     id: blockId,
     type: "review",
-    title: requireNonEmpty(options.step.title, "Review step title"),
+    title: content.title,
     prompt: existing?.prompt ?? promptPath(options.task.id, blockId),
     depends_on: options.fallbackDependency ? [options.fallbackDependency] : [],
     executor: existing?.executor,
     review: {
-      required: options.step.enabled,
-      maxFeedbackCycles: Math.max(0, Math.trunc(options.step.maxFeedbackCycles)),
-      preset: requireNonEmpty(options.step.preset, "Review preset"),
-      triggerCondition: normalizeTrigger(options.step.triggerCondition),
-      inputContext: requireNonEmpty(options.step.inputContext, "Review input context"),
-      passCriteria: requireNonEmpty(options.step.passCriteria, "Review pass criteria"),
-      feedbackFormat: requireNonEmpty(options.step.feedbackFormat, "Review feedback format"),
-      hook: options.step.hook
+      required: content.enabled,
+      maxFeedbackCycles: content.maxFeedbackCycles,
+      preset: content.preset,
+      triggerCondition: content.triggerCondition,
+      inputContext: content.inputContext,
+      passCriteria: content.passCriteria,
+      feedbackFormat: content.feedbackFormat,
+      hook: content.hook
     }
   };
 }
@@ -196,31 +187,27 @@ function buildReviewPipelineMutation(
   const usedBlockIds = new Set(task.blocks.map((block) => block.id));
   const nonReviewBlocks = task.blocks.filter((block) => block.type !== "review");
   const nextReviewBlocks: ManifestReviewBlock[] = [];
+  const promptMarkdownByBlockId: Array<{ blockId: string; markdown: string }> = [];
   let fallbackDependency = nonReviewBlocks.at(-1)?.id ?? null;
 
   for (const step of input.steps) {
     if (step.blockId && !existingReviews.has(step.blockId)) {
       throw new Error(`Review block '${task.id}#${step.blockId}' does not exist.`);
     }
+    const content = normalizeReviewPipelineStepContent(step);
     const block = normalizeStep({
       task,
       existing: existingReviews,
       usedBlockIds,
       step,
-      fallbackDependency
+      fallbackDependency,
+      content
     });
     nextReviewBlocks.push(block);
+    promptMarkdownByBlockId.push({ blockId: block.id, markdown: content.promptMarkdown });
     fallbackDependency = block.id;
   }
 
-  const promptMarkdownByBlockId: Array<{ blockId: string; markdown: string }> = [];
-  for (const [index, block] of nextReviewBlocks.entries()) {
-    const promptMarkdown = input.steps[index]?.promptMarkdown.trim() || defaultPrompt(block.title);
-    promptMarkdownByBlockId.push({
-      blockId: block.id,
-      markdown: promptMarkdown.endsWith("\n") ? promptMarkdown : `${promptMarkdown}\n`
-    });
-  }
   const packageDefaults = {
     maxFeedbackCycles: Math.max(
       0,

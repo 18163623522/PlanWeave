@@ -280,6 +280,9 @@ export const enCatalog = {
   watchBackend: "Watch backend",
   watchElapsed: "Watch elapsed",
   addReviewStep: "Add Review Step",
+  reviewPipelineConflict:
+    "The Review Pipeline changed outside this form. Your edits are preserved. Reload the latest configuration before saving.",
+  reloadReviewPipelineDraft: "Reload latest configuration",
   saveReviewPipeline: "Save Review Pipeline",
   newReviewStep: "New Review Step",
   moveUp: "Move up",

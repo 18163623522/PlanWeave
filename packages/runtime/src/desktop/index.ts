@@ -391,3 +391,5 @@ export {
   taskWorkspaceRunsPageSchema
 } from "./types/taskWorkspaceQueryTypes.js";
 export type * from "./types.js";
+
+export { normalizeReviewPipelineStepContent } from "./reviewPipelineStepContent.js";

@@ -208,6 +208,9 @@ export type WorkspaceTabsReviewProps = {
   addReviewStep: () => void;
   moveReviewStep: (index: number, direction: -1 | 1) => void;
   removeReviewStep: (index: number) => void;
+  reloadReviewPipelineDraft: () => void;
+  reviewConflict: boolean;
+  reviewSaving: boolean;
   reviewDefaultCyclesDraft: number;
   reviewDraft: DesktopReviewPipelineStepInput[];
   reviewPipeline: DesktopReviewPipeline | null;

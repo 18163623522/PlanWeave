@@ -51,3 +51,5 @@ export {
   remoteAcpTelemetrySchema,
   type RemoteAcpTelemetry
 } from "./autoRun/remoteAcpTelemetry.js";
+
+export { normalizeReviewPipelineStepContent } from "./desktop/reviewPipelineStepContent.js";

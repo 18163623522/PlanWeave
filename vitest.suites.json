@@ -232,6 +232,7 @@
         "resizableSidebarLayoutHook.test.tsx",
         "resourceInspectorTransfer.test.tsx",
         "reviewPipelineHook.test.tsx",
+        "reviewPipelineDraftHook.test.tsx",
         "runnerInteractionDesktop.test.tsx",
         "runnerRecordMonitorNullable.test.tsx",
         "runtimeBridgeHandlerRegistry.test.ts",

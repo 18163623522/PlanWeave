@@ -41,6 +41,9 @@ describe("desktop renderer hook interfaces", () => {
           graph={graph}
           moveReviewStep={vi.fn()}
           removeReviewStep={vi.fn()}
+          reloadReviewPipelineDraft={vi.fn()}
+          reviewConflict={false}
+          reviewSaving={false}
           reviewDefaultCyclesDraft={1}
           reviewDraft={draft}
           reviewPipeline={reviewPipeline}
@@ -68,6 +71,45 @@ describe("desktop renderer hook interfaces", () => {
     const editedArgument = screen.getByLabelText("Hook arg 2") as HTMLInputElement;
     expect(editedArgument.value).toBe("edited");
     expect(document.activeElement).toBe(editedArgument);
+  });
+
+  it("shows a conflict, disables saving and exposes an explicit reload action", async () => {
+    const [{ ReviewPipelineView }, { createTranslator }] = await Promise.all([
+      import("../renderer/views/ReviewPipelineView"),
+      import("../renderer/i18n")
+    ]);
+    const reload = vi.fn();
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ReviewPipelineView
+        addReviewStep={vi.fn()}
+        graph={graph}
+        moveReviewStep={vi.fn()}
+        removeReviewStep={vi.fn()}
+        reloadReviewPipelineDraft={reload}
+        reviewConflict={true}
+        reviewSaving={false}
+        reviewDefaultCyclesDraft={7}
+        reviewDraft={reviewPipeline.steps}
+        reviewPipeline={reviewPipeline}
+        reviewTaskId="T-ALPHA"
+        saveReviewPipeline={save}
+        setReviewDefaultCyclesDraft={vi.fn()}
+        setReviewTaskId={vi.fn()}
+        t={createTranslator("en")}
+        updateReviewStep={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("alert").textContent).toContain("Your edits are preserved");
+    const saveButton = screen.getByRole("button", { name: "Save Review Pipeline" });
+    expect(saveButton).toHaveProperty("disabled", true);
+    fireEvent.click(saveButton);
+    expect(save).not.toHaveBeenCalled();
+    const reloadButton = screen.getByRole("button", { name: "Reload latest configuration" });
+    reloadButton.focus();
+    expect(document.activeElement).toBe(reloadButton);
+    fireEvent.click(reloadButton);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it("reloads the current Desktop Project Session after saving a review pipeline", async () => {

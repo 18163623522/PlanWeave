@@ -270,6 +270,9 @@ export const zhCnCatalog = {
   watchBackend: "监听后端",
   watchElapsed: "监听耗时",
   addReviewStep: "添加 Review Step",
+  reviewPipelineConflict:
+    "Review Pipeline 已在外部变更，本地编辑仍保留。请重新载入最新配置后再保存。",
+  reloadReviewPipelineDraft: "重新载入最新配置",
   saveReviewPipeline: "保存 Review Pipeline",
   newReviewStep: "新 Review Step",
   moveUp: "上移",

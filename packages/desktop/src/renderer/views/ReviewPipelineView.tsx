@@ -35,6 +35,9 @@ export type ReviewPipelineViewProps = {
   graph: DesktopGraphViewModel | null;
   moveReviewStep: (index: number, direction: -1 | 1) => void;
   removeReviewStep: (index: number) => void;
+  reloadReviewPipelineDraft: () => void;
+  reviewConflict: boolean;
+  reviewSaving: boolean;
   reviewDefaultCyclesDraft: number;
   reviewDraft: DesktopReviewPipelineStepInput[];
   reviewPipeline: DesktopReviewPipeline | null;
@@ -81,6 +84,9 @@ export function ReviewPipelineView({
   graph,
   moveReviewStep,
   removeReviewStep,
+  reloadReviewPipelineDraft,
+  reviewConflict,
+  reviewSaving,
   reviewDefaultCyclesDraft,
   reviewDraft,
   reviewPipeline,
@@ -117,12 +123,26 @@ export function ReviewPipelineView({
           </Button>
           <Button
             className="max-w-full min-w-0 overflow-hidden"
+            disabled={reviewConflict || reviewSaving || !reviewPipeline}
+            data-testid="review-pipeline-save"
             onClick={() => void saveReviewPipeline()}
           >
             {t("saveReviewPipeline")}
           </Button>
         </div>
       </div>
+      {reviewConflict ? (
+        <div
+          role="alert"
+          data-testid="review-pipeline-conflict"
+          className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface-raised p-4"
+        >
+          <p className="flex-1 text-sm text-text-muted">{t("reviewPipelineConflict")}</p>
+          <Button variant="outline" disabled={reviewSaving} onClick={reloadReviewPipelineDraft}>
+            {t("reloadReviewPipelineDraft")}
+          </Button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-end gap-3 rounded-md border border-border/80 bg-surface-raised p-4 shadow-sm">
         <div className="min-w-[min(100%,16rem)] flex-1 sm:flex-none">
           <Select value={reviewTaskId ?? ""} onValueChange={setReviewTaskId}>
