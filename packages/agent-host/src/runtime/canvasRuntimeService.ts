@@ -195,6 +195,14 @@ function errorCode(error: unknown): CanvasRuntimeServiceError {
   return new CanvasRuntimeServiceError("canvas_runtime_operation_failed");
 }
 
+function isTerminalResetResolution(resolution: CanvasRuntimeResetResolution): boolean {
+  return (
+    resolution.kind === "not_found" ||
+    resolution.kind === "succeeded" ||
+    (resolution.kind === "failed" && !resolution.error.reconcileRequired)
+  );
+}
+
 export type CanvasRuntimeServiceOptions = {
   resolver: CanvasRuntimeResolverPort;
   receipts: CanvasRuntimeRpcRepository;
@@ -279,7 +287,7 @@ export class CanvasRuntimeService {
       this.assertOpen(command, active);
       const result =
         command.type === "canvas_runtime.cancel"
-          ? await this.cancel(command)
+          ? await this.cancel(command, active)
           : await this.execute(command, active);
       this.assertOpen(command, active);
       this.options.receipts.complete(
@@ -342,8 +350,20 @@ export class CanvasRuntimeService {
     if (active.controller.signal.aborted) throw new CanvasRuntimeServiceError("request_cancelled");
   }
 
-  private async cancel(command: CanvasRuntimeCancelCommand) {
+  private beginCommit(
+    command: CanvasRuntimeRequestCommand,
+    active: ActiveRequest,
+    runtimeLeaseId?: string,
+    allowInactive = false
+  ): void {
+    this.assertOpen(command, active);
+    if (runtimeLeaseId !== undefined) this.requireLease(command, runtimeLeaseId, allowInactive);
+    active.committed = true;
+  }
+
+  private async cancel(command: CanvasRuntimeCancelCommand, active: ActiveRequest) {
     await this.options.resolver.resolve(command.scope);
+    this.assertOpen(command, active);
     const target = this.active.get(command.targetRequestId);
     target?.controller.abort("request_cancelled");
     return { targetRequestId: command.targetRequestId, cancelled: Boolean(target) };
@@ -355,51 +375,50 @@ export class CanvasRuntimeService {
         command.scope,
         command.operation.operationId
       );
-      if (
-        stored.kind === "not_found" ||
-        stored.kind === "succeeded" ||
-        (stored.kind === "failed" && !stored.error.reconcileRequired)
-      ) {
+      if (isTerminalResetResolution(stored)) {
         return stored;
       }
       const resolved = await this.options.resolver.resolve(command.scope);
-      return this.resetStatus(command, resolved, stored);
+      return this.withCommandLane(command, active, () =>
+        this.resetStatus(command, resolved, active)
+      );
     }
     const resolved = await this.options.resolver.resolve(command.scope);
     this.assertOpen(command, active);
     const operation = command.operation;
     if (operation.operation === "availability") {
       const target = canvasRuntimeContentTargetSchema.parse(operation.contentTarget);
-      return this.withMaterializationLock(command.scope, resolved, async () => {
+      return this.withMaterializationLock(command, resolved, active, async () => {
         return this.ensureMaterialized(command, resolved, target, active);
       });
     }
     if (operation.operation === "resolve_work_items") {
       const target = canvasRuntimeContentTargetSchema.parse(operation.contentTarget);
-      return this.withMaterializationLock(command.scope, resolved, async () => {
+      return this.withMaterializationLock(command, resolved, active, async () => {
         const evidence = await this.ensureMaterialized(command, resolved, target, active);
+        this.assertOpen(command, active);
         return resolveCanvasRuntimeWorkItems(resolved, operation.input, evidence);
       });
     }
     if (operation.operation === "acquire") {
       const target = canvasRuntimeContentTargetSchema.parse(operation.contentTarget);
-      return this.withMaterializationLock(command.scope, resolved, async () => {
+      return this.withMaterializationLock(command, resolved, active, async () => {
         const evidence = await this.ensureMaterialized(command, resolved, target, active);
-        return this.acquire(command, evidence);
+        return this.acquire(command, evidence, active);
       });
     }
     switch (operation.operation) {
       case "release": {
         const { runtimeLeaseId } = operation;
-        return this.withScopeLane(command.scope, async () => {
-          this.requireLease(command, runtimeLeaseId, true);
+        return this.withCommandLane(command, active, async () => {
+          this.beginCommit(command, active, runtimeLeaseId, true);
           return {
             released: this.options.receipts.releaseLease(runtimeLeaseId)
           };
         });
       }
       default:
-        return this.withScopeLane(command.scope, () =>
+        return this.withCommandLane(command, active, () =>
           this.executeLeased(command, resolved, active)
         );
     }
@@ -412,6 +431,7 @@ export class CanvasRuntimeService {
     active: ActiveRequest
   ) {
     await recoverPendingAuthoritativeCanvasMaterialization(resolved.canvas);
+    this.assertOpen(command, active);
     const receiptFile = join(resolved.canvas.workspaceRoot, "authority-content-target.json");
     let materializedTarget = await this.readMaterializedContentTarget(receiptFile);
     let available: CanvasRuntimeAvailabilityEvidence | undefined;
@@ -427,32 +447,35 @@ export class CanvasRuntimeService {
     if (manifestExists) {
       available = await this.availability(resolved);
     }
+    this.assertOpen(command, active);
     if (
       !contentTargetMatches(materializedTarget, target) ||
       available?.graphFingerprint !== target.graphFingerprint
     ) {
-      const hasLiveLease = this.options.receipts
-        .activeLeases(command.scope)
-        .some((lease) => Date.parse(lease.expiresAt) > this.now().getTime());
-      if (hasLiveLease) throw new CanvasRuntimeServiceError("content_out_of_sync");
+      this.requireNoLiveLease(command);
       const authoritative = await this.options.contentTransfer.fetch(
         command.scope,
         target,
         active.controller.signal
       );
       this.assertOpen(command, active);
+      this.requireNoLiveLease(command);
+      this.beginCommit(command, active);
       await materializeAuthoritativeCanvasWorkspace({
         workspace: resolved.canvas,
         authorityProjectId: command.scope.projectId,
         content: authoritative.content
       });
+      this.assertOpen(command, active);
       await this.writeMaterializedContentTarget(receiptFile, target);
       materializedTarget = target;
       available = undefined;
     }
     if (!available) {
+      this.assertOpen(command, active);
       available = await this.availability(resolved);
     }
+    this.assertOpen(command, active);
     assertCanvasRuntimeMaterializationEvidence(materializedTarget, available, {
       graphFingerprint: target.graphFingerprint,
       contentTarget: target
@@ -491,13 +514,28 @@ export class CanvasRuntimeService {
   }
 
   private async withMaterializationLock<T>(
-    scope: CanvasRuntimeLogicalScope,
+    command: CanvasRuntimeRequestCommand,
     resolved: ResolvedCanvasRuntime,
+    active: ActiveRequest,
     operation: () => Promise<T>
   ): Promise<T> {
-    return this.withScopeLane(scope, () =>
-      withAuthoritativeCanvasWorkspaceLock(resolved.canvas, operation)
+    return this.withCommandLane(command, active, () =>
+      withAuthoritativeCanvasWorkspaceLock(resolved.canvas, () => {
+        this.assertOpen(command, active);
+        return operation();
+      })
     );
+  }
+
+  private async withCommandLane<T>(
+    command: CanvasRuntimeRequestCommand,
+    active: ActiveRequest,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    return this.withScopeLane(command.scope, () => {
+      this.assertOpen(command, active);
+      return operation();
+    });
   }
 
   private async withScopeLane<T>(
@@ -532,7 +570,8 @@ export class CanvasRuntimeService {
 
   private async acquire(
     command: CanvasRuntimeRequestCommand,
-    available: CanvasRuntimeAvailabilityEvidence
+    available: CanvasRuntimeAvailabilityEvidence,
+    active: ActiveRequest
   ) {
     if (command.operation.operation !== "acquire") throw new Error("invalid_operation_input");
     const expected = command.operation.expectedEvidence;
@@ -551,6 +590,7 @@ export class CanvasRuntimeService {
       throw new CanvasRuntimeServiceError("deadline_exceeded");
     }
     const runtimeLeaseId = randomUUID();
+    this.beginCommit(command, active);
     this.options.receipts.createLease({
       runtimeLeaseId,
       ...command.scope,
@@ -587,12 +627,33 @@ export class CanvasRuntimeService {
     return lease;
   }
 
+  private requireNoLiveLease(command: CanvasRuntimeRequestCommand): void {
+    const hasLiveLease = this.options.receipts
+      .activeLeases(command.scope)
+      .some((lease) => Date.parse(lease.expiresAt) > this.now().getTime());
+    if (hasLiveLease) throw new CanvasRuntimeServiceError("content_out_of_sync");
+  }
+
+  private requireExclusiveLease(command: CanvasRuntimeRequestCommand, runtimeLeaseId: string) {
+    const lease = this.requireLease(command, runtimeLeaseId);
+    const hasConflictingLease = this.options.receipts
+      .activeLeases(command.scope)
+      .some(
+        (candidate) =>
+          candidate.runtimeLeaseId !== runtimeLeaseId &&
+          Date.parse(candidate.expiresAt) > this.now().getTime()
+      );
+    if (hasConflictingLease) throw new CanvasRuntimeServiceError("active_lease");
+    return lease;
+  }
+
   private async executeLeased(
     command: CanvasRuntimeRequestCommand,
     resolved: ResolvedCanvasRuntime,
     active: ActiveRequest
   ) {
     if (!("runtimeLeaseId" in command.operation)) throw new Error("runtime_lease_required");
+    this.assertOpen(command, active);
     const lease = this.requireLease(command, command.operation.runtimeLeaseId);
     const runtime = createRemoteBlockRuntimePort({ projectRoot: resolved.canvas });
     const operation = command.operation;
@@ -603,31 +664,34 @@ export class CanvasRuntimeService {
         return runtime.inspect(remoteBlockInspectInputSchema.parse(operation.input));
       case "claim": {
         const input = remoteBlockClaimInputSchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.claim(input);
       }
       case "activate": {
         const input = remoteBlockRefIdentitySchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.activate(input);
       }
       case "query":
         return runtime.query(remoteBlockOperationQuerySchema.parse(operation.input));
-      case "reconcile":
-        return runtime.reconcile(remoteBlockOperationQuerySchema.parse(operation.input));
+      case "reconcile": {
+        const input = remoteBlockOperationQuerySchema.parse(operation.input);
+        this.beginCommit(command, active, operation.runtimeLeaseId);
+        return runtime.reconcile(input);
+      }
       case "mark_interrupted": {
         const input = remoteBlockInterruptionInputSchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.markInterrupted(input);
       }
       case "resume_attempt": {
         const input = remoteBlockRefIdentitySchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.resumeAttempt(input);
       }
       case "retry_attempt": {
         const input = remoteBlockRetryAttemptInputSchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.retryAttempt(input);
       }
       case "complete": {
@@ -642,6 +706,8 @@ export class CanvasRuntimeService {
           transferInput.transfer,
           active.controller.signal
         );
+        this.assertOpen(command, active);
+        this.requireLease(command, operation.runtimeLeaseId);
         const domainInput = remoteBlockCompletionInputSchema
           .omit({ reportBytes: true })
           .parse(transferInput.domainInput);
@@ -649,12 +715,12 @@ export class CanvasRuntimeService {
           ...domainInput,
           reportBytes
         });
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.complete(input);
       }
       case "fail": {
         const input = remoteBlockFailureInputSchema.parse(operation.input);
-        active.committed = true;
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         return runtime.fail(input);
       }
       case "artifact_read": {
@@ -669,6 +735,8 @@ export class CanvasRuntimeService {
         const artifact = await createRemoteBlockArtifactSource({
           projectRoot: resolved.canvas
         }).read(input);
+        this.assertOpen(command, active);
+        this.requireLease(command, operation.runtimeLeaseId);
         const sha256 = createHash("sha256").update(artifact.bytes).digest("hex");
         if (
           artifact.artifactRef !== transferInput.transfer.artifactRef ||
@@ -677,6 +745,7 @@ export class CanvasRuntimeService {
         ) {
           throw new CanvasRuntimeServiceError("runtime_artifact_evidence_mismatch");
         }
+        this.beginCommit(command, active, operation.runtimeLeaseId);
         await this.options.artifactTransfer.upload(
           transferInput.transfer,
           artifact.bytes,
@@ -704,27 +773,20 @@ export class CanvasRuntimeService {
     operation: Extract<CanvasRuntimeRequestCommand["operation"], { operation: "reset" }>,
     active: ActiveRequest
   ) {
-    const now = this.now().getTime();
-    const conflicting = this.options.receipts
-      .activeLeases(command.scope)
-      .filter(
-        (candidate) =>
-          candidate.runtimeLeaseId !== lease.runtimeLeaseId && Date.parse(candidate.expiresAt) > now
-      );
-    if (conflicting.length > 0) {
-      throw new CanvasRuntimeServiceError("active_lease");
-    }
+    this.requireExclusiveLease(command, lease.runtimeLeaseId);
     const available = await this.availability(resolved);
+    this.assertOpen(command, active);
+    const currentLease = this.requireExclusiveLease(command, lease.runtimeLeaseId);
     if (
-      lease.sourceRevision !== operation.evidence.sourceRevision ||
-      lease.graphFingerprint !== operation.evidence.graphFingerprint ||
+      currentLease.sourceRevision !== operation.evidence.sourceRevision ||
+      currentLease.graphFingerprint !== operation.evidence.graphFingerprint ||
       available.sourceRevision !== operation.evidence.sourceRevision ||
       available.graphFingerprint !== operation.evidence.graphFingerprint
     ) {
       throw new CanvasRuntimeServiceError("content_out_of_sync");
     }
     const { reason } = canvasRuntimeResetInputSchema.parse(operation.input);
-    active.committed = true;
+    this.beginCommit(command, active, operation.runtimeLeaseId);
     try {
       await resetRuntimeState({
         projectRoot: resolved.canvas,
@@ -744,6 +806,7 @@ export class CanvasRuntimeService {
       throw error;
     }
     const after = await this.availability(resolved);
+    this.assertOpen(command, active);
     const result = canvasRuntimeResetResultSchema.parse({
       operationId: operation.evidence.operationId,
       sourceRevision: after.sourceRevision,
@@ -760,15 +823,19 @@ export class CanvasRuntimeService {
   private async resetStatus(
     command: CanvasRuntimeRequestCommand,
     resolved: ResolvedCanvasRuntime,
-    status: CanvasRuntimeResetResolution
+    active: ActiveRequest
   ): Promise<CanvasRuntimeResetResolution> {
     if (command.operation.operation !== "reset_status") {
       throw new CanvasRuntimeServiceError("invalid_operation_input");
     }
     const operationId = command.operation.operationId;
+    const status = this.options.receipts.resetStatus(command.scope, operationId);
+    if (isTerminalResetResolution(status)) return status;
     const original = this.options.receipts.resetOperation(command.scope, operationId);
     if (!original || this.active.has(original.requestId)) return status;
-    return this.resolveInterruptedReset(original.command, resolved);
+    return this.resolveInterruptedReset(original.command, resolved, () =>
+      this.assertOpen(command, active)
+    );
   }
 
   private async recoverInterruptedReset(command: CanvasRuntimeRequestCommand): Promise<void> {
@@ -777,7 +844,9 @@ export class CanvasRuntimeService {
     let resolution: CanvasRuntimeResetResolution;
     try {
       const resolved = await this.options.resolver.resolve(resetCommand.scope);
-      resolution = await this.resolveInterruptedReset(resetCommand, resolved);
+      resolution = await this.withScopeLane(resetCommand.scope, () =>
+        this.resolveInterruptedReset(resetCommand, resolved)
+      );
     } catch {
       resolution = this.options.receipts.resolveReset(
         resetCommand.scope,
@@ -817,7 +886,8 @@ export class CanvasRuntimeService {
     command: CanvasRuntimeRequestCommand & {
       operation: Extract<CanvasRuntimeRequestCommand["operation"], { operation: "reset" }>;
     },
-    resolved: ResolvedCanvasRuntime
+    resolved: ResolvedCanvasRuntime,
+    beforeResolution?: () => void
   ): Promise<CanvasRuntimeResetResolution> {
     const evidence = command.operation.evidence;
     const marker = await readRuntimeResetReceipt({ projectRoot: resolved.canvas });
@@ -827,6 +897,7 @@ export class CanvasRuntimeService {
       marker.graphFingerprint === evidence.graphFingerprint
     ) {
       const after = await this.availability(resolved);
+      beforeResolution?.();
       if (
         after.sourceRevision === evidence.sourceRevision &&
         after.graphFingerprint === evidence.graphFingerprint &&
@@ -847,6 +918,7 @@ export class CanvasRuntimeService {
         error: { code: "content_out_of_sync", retryable: false }
       });
     }
+    beforeResolution?.();
     return this.options.receipts.resolveReset(command.scope, evidence.operationId, {
       kind: "failed",
       error: { code: "reset_commit_not_observed", retryable: false }
