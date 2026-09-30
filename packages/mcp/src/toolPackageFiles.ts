@@ -1,11 +1,10 @@
 import { constants } from "node:fs";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createManagedProjectId,
   initManagedWorkspace,
-  initOrOpenProject,
   openProject,
   readPackageFiles,
   replacePackageFiles,
@@ -13,6 +12,7 @@ import {
   resolveTaskCanvasWorkspace,
   toArchivePath,
   validatePackage,
+  validatePackageDraft,
   type PackageFileEntry,
   type ValidationReport
 } from "@planweave-ai/runtime";
@@ -49,7 +49,7 @@ export async function importPackageFiles(
   files: ExportedPlanPackageFile[],
   overwrite: boolean
 ): Promise<{
-  project: Awaited<ReturnType<typeof initOrOpenProject>>;
+  project: Awaited<ReturnType<typeof openProject>>;
   validation: ValidationReport;
   importedFiles: number;
 }> {
@@ -63,12 +63,9 @@ export async function importPackageFiles(
   }));
   const tempRoot = await mkdtemp(join(tmpdir(), "planweave-mcp-import-"));
   try {
-    const tempProjectRoot = join(tempRoot, "project");
-    await mkdir(tempProjectRoot, { recursive: true });
-    const tempProject = await initOrOpenProject(tempProjectRoot);
-    const tempWorkspace = await resolveTaskCanvasWorkspace(tempProject.rootPath, "default");
-    await replacePackageFiles(tempWorkspace.packageDir, normalizedFiles);
-    const tempValidation = await validatePackage({ projectRoot: tempProject.rootPath });
+    const draftRoot = join(tempRoot, "package");
+    await replacePackageFiles(draftRoot, normalizedFiles);
+    const { validation: tempValidation } = await validatePackageDraft({ draftRoot });
     if (!tempValidation.ok) {
       throw new Error(validationMessage("Imported PlanWeave package is invalid", tempValidation));
     }
