@@ -61,6 +61,11 @@ export async function importPackageFiles(
     content: file.content,
     encoding: file.encoding
   }));
+  if (normalizedFiles.some((file) => file.path === "project-graph.json")) {
+    throw new Error(
+      "Imported PlanWeave package is invalid: this import accepts a single-canvas package with a root manifest.json, not a project-graph.json project draft."
+    );
+  }
   const tempRoot = await mkdtemp(join(tmpdir(), "planweave-mcp-import-"));
   try {
     const draftRoot = join(tempRoot, "package");

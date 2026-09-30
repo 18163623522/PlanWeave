@@ -209,6 +209,79 @@ describe("toolPackageFiles", () => {
     expect(await importTempDirectories()).toEqual(tempBefore);
   });
 
+  it.each([
+    { overwrite: false, rootManifest: "{}" },
+    { overwrite: true, rootManifest: "{}" },
+    { overwrite: false, rootManifest: packageFiles[0].content },
+    { overwrite: true, rootManifest: packageFiles[0].content }
+  ])("rejects a project-mode package before registration or replacement ($overwrite, $rootManifest)", async ({
+    overwrite,
+    rootManifest
+  }) => {
+    await initManagedWorkspace({ name: "Unrelated" });
+    const target = await importPackageFiles("Existing Import", packageFiles, false);
+    const packageDir = join(target.project.rootPath, "canvases", "default", "package");
+    await writeFile(join(packageDir, "sentinel.md"), "original package\n");
+    const before = await diskSnapshot(home);
+    const tempBefore = await importTempDirectories();
+    const files: PackageFileEntry[] = [
+      { path: "manifest.json", content: rootManifest, encoding: "utf8" },
+      {
+        path: "project-graph.json",
+        content: JSON.stringify({
+          version: "plan-project/v1",
+          canvases: [
+            {
+              id: "default",
+              type: "canvas",
+              title: "Default",
+              packageDir: "canvases/default/package",
+              stateFile: "canvases/default/state.json",
+              resultsDir: "canvases/default/results"
+            }
+          ],
+          edges: [],
+          crossTaskEdges: []
+        }),
+        encoding: "utf8"
+      },
+      {
+        ...packageFiles[0],
+        path: "canvases/default/package/manifest.json"
+      }
+    ];
+
+    const error = await importPackageFiles(
+      overwrite ? "Existing Import" : "New Invalid Import",
+      files,
+      overwrite
+    ).then(
+      () => null,
+      (reason: unknown) => reason
+    );
+
+    expect(await diskSnapshot(home)).toEqual(before);
+    expect(await readFile(join(packageDir, "manifest.json"), "utf8")).toBe(packageFiles[0].content);
+    expect(await readFile(join(packageDir, "sentinel.md"), "utf8")).toBe("original package\n");
+    expect(await importTempDirectories()).toEqual(tempBefore);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toHaveProperty("message", expect.stringContaining("single-canvas"));
+  });
+
+  it("imports nested package assets without treating them as a project draft", async () => {
+    const files: PackageFileEntry[] = [
+      ...packageFiles,
+      { ...packageFiles[0], path: "assets/package/manifest.json" },
+      { path: "assets/project-graph.json", content: "{}", encoding: "utf8" }
+    ];
+    const imported = await importPackageFiles("Nested Assets", files, false);
+
+    expect(imported.validation.ok).toBe(true);
+    expect((await exportCanvasPackage(imported.project.projectId)).files).toEqual(
+      [...files].sort((left, right) => left.path.localeCompare(right.path))
+    );
+  });
+
   it("overwrites only the selected package and does not follow its existing symlinks", async () => {
     const unrelated = await initManagedWorkspace({ name: "Unrelated" });
     const target = await initManagedWorkspace({ name: "Existing Import" });
