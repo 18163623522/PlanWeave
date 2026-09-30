@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, renderHook } from "@testing-library/react";
-import type { DesktopBlockDetail } from "@planweave-ai/runtime";
+import type { DesktopBlockDetail, DesktopTaskDetail } from "@planweave-ai/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopBridgeMock } from "./desktopBridgeMock";
 import { project } from "./helpers/desktopProjectFixtures";
@@ -9,6 +9,21 @@ import { graph } from "./helpers/graphFixtures";
 import { cleanupRendererTestEnvironment } from "./helpers/rendererTestEnvironment";
 
 afterEach(cleanupRendererTestEnvironment);
+
+function savedTaskDetail(): DesktopTaskDetail {
+  return {
+    taskId: "T-ALPHA",
+    title: "Alpha task",
+    status: "ready",
+    executor: null,
+    promptMarkdown: "# Local alpha",
+    graphVersion: "pgv-saved",
+    promptHash: "hash-saved",
+    promptMissing: false,
+    acceptance: [],
+    blockOrder: []
+  };
+}
 
 describe("desktop renderer hook interfaces", () => {
   it("stops prompt autosave when a dirty draft conflicts with an external prompt change", async () => {
@@ -68,7 +83,8 @@ describe("desktop renderer hook interfaces", () => {
     const bridge = createDesktopBridgeMock({
       updateTaskPrompt: vi
         .fn()
-        .mockResolvedValue({ ok: true, graphVersion: "pgv-saved", diagnostics: [] })
+        .mockResolvedValue({ ok: true, affectedTasks: ["T-ALPHA"], diagnostics: [] }),
+      getTaskDetail: vi.fn().mockResolvedValue(savedTaskDetail())
     });
     vi.stubGlobal("planweave", bridge);
     vi.resetModules();
@@ -121,10 +137,11 @@ describe("desktop renderer hook interfaces", () => {
     const bridge = createDesktopBridgeMock({
       updateTaskPrompt: vi
         .fn()
-        .mockResolvedValue({ ok: true, graphVersion: "pgv-saved", diagnostics: [] }),
+        .mockResolvedValue({ ok: true, affectedTasks: ["T-ALPHA"], diagnostics: [] }),
+      getTaskDetail: vi.fn().mockResolvedValue(savedTaskDetail()),
       updateTaskTitle: vi
         .fn()
-        .mockResolvedValue({ ok: true, graphVersion: "pgv-title-saved", diagnostics: [] })
+        .mockResolvedValue({ ok: true, affectedTasks: ["T-ALPHA"], diagnostics: [] })
     });
     vi.stubGlobal("planweave", bridge);
     vi.resetModules();
@@ -229,7 +246,7 @@ describe("desktop renderer hook interfaces", () => {
     const bridge = createDesktopBridgeMock({
       updateBlockPrompt: vi
         .fn()
-        .mockResolvedValue({ ok: true, graphVersion: "pgv-after", diagnostics: [] }),
+        .mockResolvedValue({ ok: true, affectedTasks: ["T-ALPHA"], diagnostics: [] }),
       getBlockDetail: vi.fn().mockResolvedValue(blockAfter)
     });
     vi.stubGlobal("planweave", bridge);

@@ -206,6 +206,8 @@
         "projectSidebarInteractions.test.tsx",
         "projectWorkspaceProviderAuthority.test.tsx",
         "promptDraftsHook.test.tsx",
+        "promptDraftsLifecycleHook.test.tsx",
+        "promptDraftsReloadHook.test.tsx",
         "recordWorkspaceNavigation.test.tsx",
         "recordWorkspaceTarget.test.ts",
         "rememberedServerGroups.test.ts",
