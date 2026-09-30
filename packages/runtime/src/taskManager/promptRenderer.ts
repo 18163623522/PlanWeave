@@ -1,22 +1,11 @@
 import { join } from "node:path";
 import { parseBlockRef } from "../graph/compileTaskGraph.js";
 import { requireMapValue } from "../graph/requireMapValue.js";
-import {
-  loadPlanGraphPackage,
-  type LoadedPlanGraphPackage
-} from "../plangraph/packageRepository.js";
 import { buildAgentClaimMarkdown } from "../plangraph/projections/agentContextProjection.js";
 import type { ExecutionGraphSession, PackageWorkspaceRef } from "../types.js";
-import { loadProjectCanvasRuntimeAggregation } from "../projectGraph/runtimeAggregation.js";
-import { canvasCommandFlagForLoadedProjectGraph } from "./canvasCommandScope.js";
-import { buildExecutionStatus, type ExecutionStatus } from "./executionStatus.js";
-import {
-  renderProjectCanvasContextFromSnapshot,
-  type ProjectCanvasContext
-} from "./projectCanvasContext.js";
-import { createProjectGraphClaimGuardFromAggregation } from "./projectGraphClaimGuard.js";
-import { createPromptSourceReader, type PromptSourceReader } from "./promptSourceReader.js";
-import { loadRuntimeReadonly, type RuntimeContext } from "./runtimeContext.js";
+import { createPromptRenderContext, type PromptRenderContext } from "./promptRenderContext.js";
+import type { PromptSourceReader } from "./promptSourceReader.js";
+import type { RuntimeContext } from "./runtimeContext.js";
 import {
   getBlock,
   getTask,
@@ -37,16 +26,6 @@ export {
   promptSourceSummarySchema
 } from "./promptContracts.js";
 export type { PromptSourceKind, PromptSourceSummary, PromptSurface } from "./promptContracts.js";
-
-interface PromptRenderContext {
-  runtime: RuntimeContext;
-  status: ExecutionStatus;
-  planGraphPackage: LoadedPlanGraphPackage;
-  promptSourceReader: PromptSourceReader;
-  projectCanvasContextRenderer: (taskId: string) => ProjectCanvasContext;
-  canvasCommandFlag: string;
-  packagePromptSnapshotMode: "frozen" | "refresh-missing";
-}
 
 function renderNodeList(title: string, lines: string[]): string {
   return [
@@ -159,26 +138,7 @@ export async function renderPromptSurface(options: {
   allowMissingPromptSources?: boolean;
   renderMode?: "default" | "remote-dispatch";
 }): Promise<PromptSurface> {
-  const runtime = await loadRuntimeReadonly(options);
-  const projectAggregation = await loadProjectCanvasRuntimeAggregation(runtime.workspace);
-  const claimGuard = createProjectGraphClaimGuardFromAggregation(runtime, projectAggregation);
-  const [status, planGraphPackage] = await Promise.all([
-    buildExecutionStatus(runtime, { claimGuard }),
-    loadPlanGraphPackage(runtime.workspace)
-  ]);
-  const context: PromptRenderContext = {
-    runtime,
-    status,
-    planGraphPackage,
-    promptSourceReader: createPromptSourceReader(runtime.workspace),
-    projectCanvasContextRenderer: (taskId) =>
-      renderProjectCanvasContextFromSnapshot(runtime, projectAggregation, taskId),
-    canvasCommandFlag: canvasCommandFlagForLoadedProjectGraph(
-      runtime.workspace,
-      projectAggregation.loaded
-    ),
-    packagePromptSnapshotMode: "refresh-missing"
-  };
+  const context = await createPromptRenderContext(options);
   return renderPromptSurfaceFromContext(context, options.ref, {
     includeSubmissionInstructions: options.includeSubmissionInstructions,
     allowMissingPromptSources: options.allowMissingPromptSources,

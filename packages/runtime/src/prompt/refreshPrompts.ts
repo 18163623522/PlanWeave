@@ -1,6 +1,7 @@
 import { loadPackage } from "../package/loadPackage.js";
 import { compileTaskGraph } from "../graph/compileTaskGraph.js";
-import { renderPrompt } from "../taskManager/index.js";
+import { createPromptRenderContext } from "../taskManager/promptRenderContext.js";
+import { renderPromptSurfaceFromContext } from "../taskManager/promptRenderer.js";
 import type { PackageWorkspaceRef, RefreshPromptsResult } from "../types.js";
 
 export async function refreshPrompts(options: {
@@ -8,12 +9,16 @@ export async function refreshPrompts(options: {
 }): Promise<RefreshPromptsResult> {
   const { manifest } = await loadPackage(options.projectRoot);
   const graph = compileTaskGraph(manifest);
+  if (graph.blockRefsInManifestOrder.length === 0) {
+    return { prompts: [] };
+  }
+  const context = await createPromptRenderContext(options);
   const prompts = [];
-  for (const ref of graph.blockRefsInManifestOrder) {
+  for (const ref of context.runtime.graph.blockRefsInManifestOrder) {
     prompts.push({
       ref,
       path: "",
-      markdown: await renderPrompt({ projectRoot: options.projectRoot, ref })
+      markdown: (await renderPromptSurfaceFromContext(context, ref)).markdown
     });
   }
   return { prompts };
