@@ -333,6 +333,7 @@
         "collaborationRemoteOperationsProcess.test.ts",
         "collaborationSecurityBoundary.test.ts",
         "collaborationServerE2E.test.ts",
+        "collaborationSmokeFixture.test.ts",
         "contentVersionFacadeRemoteAuthority.test.ts",
         "credentialStorageMigration.test.ts",
         "credentialStorageSettings.test.ts",

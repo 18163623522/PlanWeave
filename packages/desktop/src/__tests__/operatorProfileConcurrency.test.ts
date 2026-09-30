@@ -128,7 +128,7 @@ it("lets B and status finish while A hangs, then allows retry after A's 30-secon
   const entered = deferred<void>();
   let fail = true;
   const f = await fixture(async (url, init) => {
-    if (String(url).startsWith("https://a.example") && fail) {
+    if (new URL(String(url)).origin === "https://a.example" && fail) {
       entered.resolve();
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener(
@@ -156,7 +156,8 @@ it("coalesces ten same-profile checks into one refresh without blocking another 
   const release = deferred<Response>();
   let refreshes = 0;
   const f = await fixture(async (url) => {
-    if (String(url).includes("a.example") && String(url).endsWith("device-refresh")) {
+    const target = new URL(String(url));
+    if (target.origin === "https://a.example" && target.pathname.endsWith("/device-refresh")) {
       refreshes++;
       entered.resolve();
       return release.promise;
@@ -442,7 +443,8 @@ it("bounds maintenance to two workers without blocking foreground C, and stops p
   let refreshes = 0;
   const signals: AbortSignal[] = [];
   const f = await fixture(async (url, init) => {
-    if (String(url).endsWith("device-refresh") && !String(url).includes("c.example")) {
+    const target = new URL(String(url));
+    if (target.pathname.endsWith("/device-refresh") && target.origin !== "https://c.example") {
       refreshes++;
       if (init?.signal) signals.push(init.signal);
       if (refreshes === 2) both.resolve();
@@ -474,7 +476,7 @@ it("invalidates an in-flight verified import without saving its late replacement
   const entered = deferred<void>();
   const late = deferred<Response>();
   const f = await fixture(async (url) => {
-    if (String(url).includes("a.example")) {
+    if (new URL(String(url)).origin === "https://a.example") {
       entered.resolve();
       return late.promise;
     }

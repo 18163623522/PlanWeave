@@ -55,7 +55,7 @@ it("identifies a migrated VPS by its endpoint instead of its stale local profile
   expect(trigger).toHaveTextContent("vm-0-3-ubuntu.example:8443");
   expect(trigger).not.toHaveTextContent("Local collaboration server operator");
   await userEvent.click(trigger);
-  expect(screen.getByRole("option", { name: /vm-0-3-ubuntu.example/ })).toHaveAttribute(
+  expect(screen.getByRole("option", { name: /vm-0-3-ubuntu\.example/ })).toHaveAttribute(
     "aria-selected",
     "true"
   );
@@ -74,7 +74,7 @@ it("does not reconnect the current Server when its menu entry is chosen", async 
     />
   );
   await userEvent.click(screen.getByRole("combobox"));
-  await userEvent.click(screen.getByRole("option", { name: /vm-0-3-ubuntu.example/ }));
+  await userEvent.click(screen.getByRole("option", { name: /vm-0-3-ubuntu\.example/ }));
   expect(onSelect).not.toHaveBeenCalled();
 });
 it("does not infer local ownership from a loopback-looking endpoint", () => {

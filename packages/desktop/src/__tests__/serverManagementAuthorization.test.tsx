@@ -798,7 +798,7 @@ it("offers only administrator identities from the same Server", async () => {
     ]
   });
   await load();
-  expect(screen.queryByRole("option", { name: /two.example/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: /two\.example/ })).not.toBeInTheDocument();
   await userEvent.selectOptions(screen.getByRole("combobox"), "alternate");
   await waitFor(() =>
     expect(api.getManagementAuthorization).toHaveBeenLastCalledWith({ profileId: "alternate" })

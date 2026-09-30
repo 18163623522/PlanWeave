@@ -145,7 +145,7 @@ describe("SettingsConnectionsSection overview Server row", () => {
       await within(screen.getByTestId("server-connection-row")).findByText("管理员")
     ).toBeVisible();
     expect(screen.queryByTestId("server-management-authorization")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /planweave.tailnet.ts.net/ }));
+    await userEvent.click(screen.getByRole("button", { name: /planweave\.tailnet\.ts\.net/ }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "管理权限…" }));
     expect(await screen.findByRole("dialog")).toHaveTextContent(remoteOrigin);
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();

@@ -217,10 +217,9 @@ export async function startCollaborationSmokeFixture(
         }
         response.writeHead(404).end();
       } catch (error) {
+        console.error("Collaboration smoke control request failed.", error);
         response.writeHead(500, { "content-type": "application/json" });
-        response.end(
-          JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
-        );
+        response.end(JSON.stringify({ error: "smoke_control_request_failed" }));
       }
     });
     const control = await listen(controlServer);
