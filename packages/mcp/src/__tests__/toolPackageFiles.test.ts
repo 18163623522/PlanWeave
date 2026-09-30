@@ -11,9 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   initManagedWorkspace,
+  replacePackageFiles,
+  validatePackageDraft,
   type PackageFileEntry,
   type PlanPackageManifest
 } from "@planweave-ai/runtime";
@@ -38,6 +40,26 @@ const packageFiles: PackageFileEntry[] = [
 
 let home: string;
 let originalHome: string | undefined;
+let caseInsensitive: boolean;
+
+beforeAll(async () => {
+  const probeRoot = await mkdtemp(join(tmpdir(), "planweave-mcp-case-probe-"));
+  try {
+    await writeFile(join(probeRoot, "case-probe"), "filesystem capability\n");
+    try {
+      caseInsensitive =
+        (await readFile(join(probeRoot, "CASE-PROBE"), "utf8")) === "filesystem capability\n";
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+      caseInsensitive = false;
+    }
+    console.info("MCP import temporary filesystem capability", { caseInsensitive });
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
+  }
+});
 
 beforeEach(async () => {
   originalHome = process.env.PLANWEAVE_HOME;
@@ -105,6 +127,32 @@ function taskPackageFiles(prompt = "nodes/T-001/prompt.md"): PackageFileEntry[] 
   return [
     { path: "manifest.json", content: JSON.stringify(manifest), encoding: "utf8" },
     { path: "nodes/T-001/blocks/B-001.md", content: "# Implement\n", encoding: "utf8" }
+  ];
+}
+
+function projectDraftFiles(graphPath: string, rootManifest: string): PackageFileEntry[] {
+  return [
+    { path: "manifest.json", content: rootManifest, encoding: "utf8" },
+    {
+      path: graphPath,
+      content: JSON.stringify({
+        version: "plan-project/v1",
+        canvases: [
+          {
+            id: "default",
+            type: "canvas",
+            title: "Default",
+            packageDir: "canvases/default/package",
+            stateFile: "canvases/default/state.json",
+            resultsDir: "canvases/default/results"
+          }
+        ],
+        edges: [],
+        crossTaskEdges: []
+      }),
+      encoding: "utf8"
+    },
+    { ...packageFiles[0], path: "canvases/default/package/manifest.json" }
   ];
 }
 
@@ -224,32 +272,7 @@ describe("toolPackageFiles", () => {
     await writeFile(join(packageDir, "sentinel.md"), "original package\n");
     const before = await diskSnapshot(home);
     const tempBefore = await importTempDirectories();
-    const files: PackageFileEntry[] = [
-      { path: "manifest.json", content: rootManifest, encoding: "utf8" },
-      {
-        path: "project-graph.json",
-        content: JSON.stringify({
-          version: "plan-project/v1",
-          canvases: [
-            {
-              id: "default",
-              type: "canvas",
-              title: "Default",
-              packageDir: "canvases/default/package",
-              stateFile: "canvases/default/state.json",
-              resultsDir: "canvases/default/results"
-            }
-          ],
-          edges: [],
-          crossTaskEdges: []
-        }),
-        encoding: "utf8"
-      },
-      {
-        ...packageFiles[0],
-        path: "canvases/default/package/manifest.json"
-      }
-    ];
+    const files = projectDraftFiles("project-graph.json", rootManifest);
 
     const error = await importPackageFiles(
       overwrite ? "Existing Import" : "New Invalid Import",
@@ -267,6 +290,69 @@ describe("toolPackageFiles", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error).toHaveProperty("message", expect.stringContaining("single-canvas"));
   });
+
+  for (const { graphPath, overwrite, rootManifest } of [
+    "project-graph.json/",
+    "PROJECT-GRAPH.JSON"
+  ].flatMap((graphPath) =>
+    [false, true].flatMap((overwrite) =>
+      ["{}", packageFiles[0].content].map((rootManifest) => ({
+        graphPath,
+        overwrite,
+        rootManifest
+      }))
+    )
+  )) {
+    it(`rejects actual project mode for ${graphPath} before persistence (overwrite=${overwrite}, validRoot=${rootManifest !== "{}"})`, async ({
+      skip
+    }) => {
+      if (graphPath === "PROJECT-GRAPH.JSON" && !caseInsensitive) {
+        skip("Temporary filesystem is case-sensitive; uppercase alias does not form project mode.");
+      }
+      await initManagedWorkspace({ name: "Unrelated" });
+      const target = await importPackageFiles("Existing Import", packageFiles, false);
+      const packageDir = join(target.project.rootPath, "canvases", "default", "package");
+      await writeFile(join(packageDir, "sentinel.md"), "original package\n");
+      const before = await diskSnapshot(home);
+      const tempBefore = await importTempDirectories();
+      const files = projectDraftFiles(graphPath, rootManifest);
+
+      const controlRoot = await mkdtemp(join(tmpdir(), "planweave-mcp-mode-control-"));
+      try {
+        await replacePackageFiles(join(controlRoot, "draft"), files);
+        const control = await validatePackageDraft({ draftRoot: join(controlRoot, "draft") });
+        expect(control).toMatchObject({ mode: "project", validation: { ok: true } });
+      } finally {
+        await rm(controlRoot, { recursive: true, force: true });
+      }
+      expect(await diskSnapshot(home)).toEqual(before);
+
+      const error = await importPackageFiles(
+        overwrite ? "Existing Import" : "New Invalid Import",
+        files,
+        overwrite
+      ).then(
+        () => null,
+        (reason: unknown) => reason
+      );
+
+      expect.soft(await diskSnapshot(home)).toEqual(before);
+      expect
+        .soft(await readFile(join(packageDir, "manifest.json"), "utf8"))
+        .toBe(packageFiles[0].content);
+      await expect
+        .soft(readFile(join(packageDir, "sentinel.md"), "utf8"))
+        .resolves.toBe("original package\n");
+      expect(await importTempDirectories()).toEqual(tempBefore);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toHaveProperty(
+        "message",
+        expect.stringContaining(
+          "Imported PlanWeave package is invalid: this import accepts a single-canvas"
+        )
+      );
+    });
+  }
 
   it("imports nested package assets without treating them as a project draft", async () => {
     const files: PackageFileEntry[] = [

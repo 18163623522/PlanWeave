@@ -70,9 +70,14 @@ export async function importPackageFiles(
   try {
     const draftRoot = join(tempRoot, "package");
     await replacePackageFiles(draftRoot, normalizedFiles);
-    const { validation: tempValidation } = await validatePackageDraft({ draftRoot });
+    const { mode, validation: tempValidation } = await validatePackageDraft({ draftRoot });
     if (!tempValidation.ok) {
       throw new Error(validationMessage("Imported PlanWeave package is invalid", tempValidation));
+    }
+    if (mode !== "single-canvas") {
+      throw new Error(
+        "Imported PlanWeave package is invalid: this import accepts a single-canvas package with a root manifest.json, not a project-graph.json project draft."
+      );
     }
 
     const projectId = createManagedProjectId(name);
