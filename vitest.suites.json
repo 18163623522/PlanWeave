@@ -959,6 +959,7 @@
         "operatorSessionProvisioning.test.ts",
         "operatorManagementAuthorization.test.ts",
         "operatorWalkthrough.test.ts",
+        "publicPackageBinHarness.test.ts",
         "ownerCanvasMaterializationRepository.test.ts",
         "ownerCanvasMaterializationService.test.ts",
         "packageSnapshotRepository.test.ts",

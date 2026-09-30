@@ -240,12 +240,30 @@ function resolvePublicPackageBin(packageRoot: string, binName: string): string {
   return absoluteBinPath;
 }
 
-async function runTypeScriptBuild(tsconfigPath: string): Promise<void> {
+export const PUBLIC_BIN_SETUP_TIMEOUT_MS = 60_000;
+
+async function setupStage<T>(stage: string, work: () => Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await work();
+  } finally {
+    console.info(
+      "PUBLIC_BIN_SETUP_STAGE",
+      JSON.stringify({ stage, elapsedMs: Math.round(performance.now() - startedAt) })
+    );
+  }
+}
+
+async function runTypeScriptBuild(tsconfigPath: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
   const compilerPath = fileURLToPath(import.meta.resolve("typescript/bin/tsc"));
   await new Promise<void>((resolveBuild, rejectBuild) => {
     const child = spawn(process.execPath, [compilerPath, "-p", tsconfigPath], {
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      signal,
+      killSignal: "SIGKILL"
     });
+    let spawnError: Error | undefined;
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -256,8 +274,19 @@ async function runTypeScriptBuild(tsconfigPath: string): Promise<void> {
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.once("error", rejectBuild);
+    // Wait for close, including on abort, before allowing the caller to remove output files.
+    child.once("error", (error) => {
+      spawnError = error;
+    });
     child.once("close", (code) => {
+      if (signal.aborted) {
+        rejectBuild(signal.reason);
+        return;
+      }
+      if (spawnError) {
+        rejectBuild(spawnError);
+        return;
+      }
       if (code === 0) {
         resolveBuild();
         return;
@@ -277,43 +306,65 @@ async function runTypeScriptBuild(tsconfigPath: string): Promise<void> {
  */
 export async function buildIsolatedPublicPackageBins(
   repositoryRoot: string,
-  packages: readonly PublicPackageSpec[]
+  packages: readonly PublicPackageSpec[],
+  { timeoutMs = PUBLIC_BIN_SETUP_TIMEOUT_MS }: { timeoutMs?: number } = {}
 ): Promise<IsolatedPublicPackageBins> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new RangeError("invalid_public_bin_setup_timeout");
   const root = await mkdtemp(join(tmpdir(), "planweave-public-bins-"));
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`isolated_public_bin_setup_timeout:${timeoutMs}ms`)),
+    timeoutMs
+  );
   try {
     await writeFile(
       join(root, "tsconfig.json"),
       await readFile(join(repositoryRoot, "tsconfig.json"))
     );
 
-    const stagedPackages = await Promise.all(
-      packages.map(async ({ packageRoot, binName }) => {
-        const packageRelativePath = relative(repositoryRoot, packageRoot);
-        const stagedPackageRoot = join(root, packageRelativePath);
-        await mkdir(stagedPackageRoot, { recursive: true });
-        await Promise.all([
-          cp(join(packageRoot, "src"), join(stagedPackageRoot, "src"), { recursive: true }),
-          cp(join(packageRoot, "package.json"), join(stagedPackageRoot, "package.json")),
-          cp(join(packageRoot, "tsconfig.json"), join(stagedPackageRoot, "tsconfig.json"))
-        ]);
-        await symlink(
-          join(packageRoot, "node_modules"),
-          join(stagedPackageRoot, "node_modules"),
-          "dir"
-        );
-        const binPath = resolvePublicPackageBin(stagedPackageRoot, binName);
-        if (existsSync(binPath)) {
-          throw new Error(`isolated_public_bin_not_clean:${binName}:${binPath}`);
-        }
-        return { binName, stagedPackageRoot, binPath };
-      })
-    );
-
-    await Promise.all(
-      stagedPackages.map(({ stagedPackageRoot }) =>
-        runTypeScriptBuild(join(stagedPackageRoot, "tsconfig.json"))
+    const stagedResults = await setupStage("copy", () =>
+      Promise.allSettled(
+        packages.map(async ({ packageRoot, binName }) => {
+          controller.signal.throwIfAborted();
+          const packageRelativePath = relative(repositoryRoot, packageRoot);
+          const stagedPackageRoot = join(root, packageRelativePath);
+          await mkdir(stagedPackageRoot, { recursive: true });
+          await cp(join(packageRoot, "src"), join(stagedPackageRoot, "src"), { recursive: true });
+          await cp(join(packageRoot, "package.json"), join(stagedPackageRoot, "package.json"));
+          await cp(join(packageRoot, "tsconfig.json"), join(stagedPackageRoot, "tsconfig.json"));
+          controller.signal.throwIfAborted();
+          await symlink(
+            join(packageRoot, "node_modules"),
+            join(stagedPackageRoot, "node_modules"),
+            "dir"
+          );
+          const binPath = resolvePublicPackageBin(stagedPackageRoot, binName);
+          if (existsSync(binPath)) {
+            throw new Error(`isolated_public_bin_not_clean:${binName}:${binPath}`);
+          }
+          return { binName, stagedPackageRoot, binPath };
+        })
       )
     );
+    const stagedPackages = stagedResults.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
+
+    await setupStage("compile", () =>
+      Promise.allSettled(
+        stagedPackages.map(async ({ stagedPackageRoot }) => {
+          try {
+            await runTypeScriptBuild(join(stagedPackageRoot, "tsconfig.json"), controller.signal);
+          } catch (error) {
+            controller.abort(error);
+            throw error;
+          }
+        })
+      )
+    );
+    controller.signal.throwIfAborted();
 
     const binPaths = Object.fromEntries(
       stagedPackages.map(({ binName, binPath }) => {
@@ -326,10 +377,12 @@ export async function buildIsolatedPublicPackageBins(
     return { root, binPaths };
   } catch (error) {
     try {
-      await rm(root, { recursive: true, force: true });
+      await setupStage("cleanup", () => rm(root, { recursive: true, force: true }));
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "isolated_public_bin_setup_cleanup_failed");
     }
     throw error;
+  } finally {
+    clearTimeout(timeout);
   }
 }

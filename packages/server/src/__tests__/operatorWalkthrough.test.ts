@@ -21,6 +21,7 @@ import { legacyWorkspaceIdForProject } from "./support/legacyWorkspaceId.js";
 import { seedOperatorSessions } from "./support/operatorAuthFixture.js";
 import {
   buildIsolatedPublicPackageBins,
+  PUBLIC_BIN_SETUP_TIMEOUT_MS,
   PublicBinProcessRegistry,
   type RunningPublicBin
 } from "./support/publicPackageBinHarness.js";
@@ -46,7 +47,7 @@ beforeAll(async () => {
   publicBinRoot = isolated.root;
   serverBinPath = isolated.binPaths["planweave-server"];
   agentHostBinPath = isolated.binPaths["planweave-agent-host"];
-});
+}, PUBLIC_BIN_SETUP_TIMEOUT_MS + 15_000);
 
 afterAll(async () => {
   if (publicBinRoot) {
